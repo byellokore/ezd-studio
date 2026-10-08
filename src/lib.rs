@@ -28,12 +28,6 @@ pub enum Error {
 /// Convenient result alias for this crate.
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Open a `.ezd` or `.dxf` file based on its extension.
-///
-/// # Errors
-///
-/// Returns an error when the file cannot be read or the contents are not a
-/// supported drawing.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -81,6 +75,12 @@ mod tests {
     }
 }
 
+/// Open a `.ezd` or `.dxf` file based on its extension.
+///
+/// # Errors
+///
+/// Returns an error when the file cannot be read or the contents are not a
+/// supported drawing.
 pub fn open_drawing(path: &std::path::Path) -> Result<Document> {
     let ext = path
         .extension()

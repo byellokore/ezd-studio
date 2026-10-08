@@ -19,6 +19,19 @@ This Mac cannot run EzCad, so open a newly saved `.ezd` in EzCad 2 on Windows to
 
 The crate license in `Cargo.toml` is MIT. Rust 1.80 or newer is required. This tree was built with rustc 1.99.
 
+## Install on an Apple Silicon Mac
+
+`scripts/package-dmg.sh` builds a release `.app` for this Mac's arm64 architecture, ad-hoc signs it, and wraps it in a DMG with an Applications shortcut. The disk image is `dist/EZD-Studio-0.1.0-apple-silicon.dmg`. `dist/` is not committed.
+
+```shell
+cd ezd-studio
+./scripts/package-dmg.sh
+```
+
+Open the DMG and drag EZD Studio onto Applications. The binary asks for macOS 11 or newer and only runs on M-series Macs. It is not notarized with an Apple Developer ID. On another Mac, the first launch needs a right-click and Open, then Open in the dialog. System Settings, Privacy & Security, also has Open Anyway if macOS blocks it.
+
+Intel Macs need a separate universal build. `cargo-bundle` can lipo `aarch64-apple-darwin` and `x86_64-apple-darwin` into one `.app`. That target is not installed here.
+
 ## Documentation
 
 | Guide | What it is for |
@@ -33,7 +46,7 @@ The crate license in `Cargo.toml` is MIT. Rust 1.80 or newer is required. This t
 ```text
 ezd-studio/
   Cargo.toml
-  src/lib.rs          public API: open_drawing, read_ezd, read_dxf, write_ezd
+  src/lib.rs          public API: open_drawing, read_ezd, read_dxf, write_ezd, write_dxf
   src/geom.rs         Document, PathObj, Contour, Pen
   src/dxf.rs          ASCII DXF import and export
   src/ezd/read.rs     .ezd reader
@@ -41,6 +54,7 @@ ezd-studio/
   src/ezd/mod.rs      Huffman coder and the byte cursor
   src/ezd/pen_template.bin
   src/main.rs         eframe window
+  scripts/package-dmg.sh
   docs/
 ```
 

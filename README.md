@@ -1,6 +1,6 @@
 # EZD Studio
 
-A macOS app for opening DXF drawings and EzCad `.ezd` jobs, checking them on a 110 mm field, and saving an `.ezd`.
+A macOS app for opening DXF drawings and EzCad `.ezd` jobs, checking them on a 110 mm field, and saving `.ezd` or `.dxf`.
 
 The app is a file tool. It reads and writes job files. It does not talk to a laser control card, and it does not replace EzCad on the machine.
 
@@ -9,7 +9,7 @@ cd ezd-studio
 cargo run --release
 ```
 
-Open accepts `.dxf` and `.ezd`. Save writes `.ezd`. Keyboard shortcuts are Command-O and Command-S.
+Open accepts `.dxf` and `.ezd`. Save .ezd writes an EzCad job. Save .dxf writes polylines in millimeters, on the original camada when the drawing has one, colored with the pen you selected. A path opened from `.ezd` has no camada, so its DXF layer is the pen name. Command-O opens. Command-S saves `.ezd`.
 
 DXF import keeps lines, polylines, arcs, circles, ellipses, and splines, and it expands inserted blocks. Solid hatches are not copied: in these files the hatch repeats the same outlines, and tracing both would mark the drawing twice. The result is centered on the field.
 
@@ -35,7 +35,7 @@ ezd-studio/
   Cargo.toml
   src/lib.rs          public API: open_drawing, read_ezd, read_dxf, write_ezd
   src/geom.rs         Document, PathObj, Contour, Pen
-  src/dxf.rs          ASCII DXF import
+  src/dxf.rs          ASCII DXF import and export
   src/ezd/read.rs     .ezd reader
   src/ezd/write.rs    .ezd writer
   src/ezd/mod.rs      Huffman coder and the byte cursor

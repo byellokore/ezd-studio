@@ -68,11 +68,21 @@ Group 62 is the ACI color. 256 means ByLayer, and the layer's color from the LAY
 
 Pens 1 through 6 in a new document use the matching palette colors from `Document::new`. Pen 0 is black.
 
+The importer stores the camada on `PathObj::layer`. An entity with no group 8 is layer `0`. Geometry inside a block that sits on layer `0` takes the INSERT's layer. Group 420, when present, is a 24-bit RGB color and wins over the ACI pen table, so a file this program saved reopens with the same pen colors.
+
+## DXF export
+
+`write_dxf` writes ASCII DXF, `$ACADVER` AC1021, `$INSUNITS` 4. Each contour with at least two points becomes one `LWPOLYLINE`. Coordinates are the current millimeters, including the centering import already applied.
+
+The layer is the stored camada. When `layer` is empty, which is every path read from `.ezd`, the layer name is the pen name. The LAYER table color is the pen used by the most contours on that layer. A tie uses the lower pen index. That color is written as the nearest ACI (group 62) and as the exact RGB (group 420). An entity whose pen color is different also carries 62 and 420. Entities that match the layer omit those groups and stay ByLayer.
+
+A closed contour does not repeat its first point in the file. Group 70 bit 0 marks it closed. Characters a DXF layer name cannot contain (`<>/\:;?*|,=`) become underscores.
+
 ## Placement
 
 After every entity is converted, `center_on_field` shifts the bounding box onto the origin. EzCad's usual workspace is a 110 mm square with the origin in the middle. The field control in the window does not change this shift. A drawing larger than the field still imports. It is centered, and it may hang past the square. The status bar shows the real width and height.
 
-Path names are `Line N`, `Polyline N`, `Spline N`, `Circle N`, `Arc N`, `Ellipse N`, or, for an insert, the block name plus the same counter.
+Path names are `Line N`, `Polyline N`, `Spline N`, `Circle N`, `Arc N`, `Ellipse N`, or, for an insert, the block name plus the same counter. The camada is stored separately on `layer` and is not part of that name.
 
 ## Bonequinha check
 

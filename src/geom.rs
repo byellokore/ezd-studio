@@ -14,6 +14,8 @@ pub struct Contour {
 pub struct PathObj {
     /// Name shown in the object list and stored in the `.ezd`.
     pub name: String,
+    /// DXF layer name. Empty when the path came from an `.ezd`, which has no layers.
+    pub layer: String,
     /// Index into [`Document::pens`].
     pub pen: usize,
     /// Geometry. Empty for notes that carry no path.
@@ -103,22 +105,28 @@ pub struct Document {
     pub notes: Vec<String>,
 }
 
+/// Palette color for pen `index`. The first eight colors repeat.
+#[must_use]
+pub(crate) fn palette_color(index: usize) -> [u8; 3] {
+    const PALETTE: [[u8; 3]; 8] = [
+        [0, 0, 0],
+        [0, 80, 220],
+        [210, 40, 40],
+        [20, 150, 60],
+        [180, 40, 170],
+        [200, 160, 0],
+        [0, 160, 170],
+        [90, 90, 90],
+    ];
+    PALETTE[index % PALETTE.len()]
+}
+
 impl Document {
     /// Empty job on a 110 mm field with the standard pen colors.
     #[must_use]
     pub fn new(title: impl Into<String>) -> Self {
-        const PALETTE: [[u8; 3]; 8] = [
-            [0, 0, 0],
-            [0, 80, 220],
-            [210, 40, 40],
-            [20, 150, 60],
-            [180, 40, 170],
-            [200, 160, 0],
-            [0, 160, 170],
-            [90, 90, 90],
-        ];
         let pens = (0..256)
-            .map(|index| Pen::new(index, PALETTE[index % PALETTE.len()]))
+            .map(|index| Pen::new(index, palette_color(index)))
             .collect();
         Self {
             title: title.into(),

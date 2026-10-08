@@ -1,9 +1,9 @@
-//! macOS window for opening DXF and EzCad drawings and saving `.ezd`.
+//! macOS window for opening DXF and EzCad drawings and saving `.ezd` or `.dxf`.
 
 use eframe::egui::{
     self, Color32, Pos2, Rect, Sense, Shape, Stroke, Vec2,
 };
-use ezd_studio::{open_drawing, write_ezd, Document, Pen};
+use ezd_studio::{open_drawing, write_dxf, write_ezd, Document, Pen};
 use std::path::PathBuf;
 
 fn main() -> eframe::Result {
@@ -129,7 +129,7 @@ impl Studio {
                 center_y: 0.0,
                 zoom: 6.0,
             },
-            status: "Open a DXF or an EzCad .ezd file. Save writes an .ezd for EzCad 2.".to_owned(),
+            status: "Open a DXF or an EzCad .ezd file. Save writes .ezd or .dxf.".to_owned(),
             fit_next: true,
         }
     }
@@ -156,13 +156,21 @@ impl Studio {
     }
 
     fn save(&mut self) {
+        self.save_with("ezd", "EzCad");
+    }
+
+    fn save_dxf(&mut self) {
+        self.save_with("dxf", "DXF");
+    }
+
+    fn save_with(&mut self, extension: &str, label: &str) {
         let start = self
             .source
             .as_ref()
             .and_then(|path| path.file_stem())
             .and_then(|stem| stem.to_str())
-            .map(|stem| format!("{stem}.ezd"));
-        let mut dialog = rfd::FileDialog::new().add_filter("EzCad", &["ezd"]);
+            .map(|stem| format!("{stem}.{extension}"));
+        let mut dialog = rfd::FileDialog::new().add_filter(label, &[extension]);
         if let Some(name) = start {
             dialog = dialog.set_file_name(name);
         }
@@ -170,9 +178,19 @@ impl Studio {
             return;
         };
         if path.extension().is_none() {
-            path.set_extension("ezd");
+            path.set_extension(extension);
         }
-        match write_ezd(&path, &self.doc) {
+        let kind = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or(extension)
+            .to_ascii_lowercase();
+        let written = if kind == "dxf" {
+            write_dxf(&path, &self.doc)
+        } else {
+            write_ezd(&path, &self.doc)
+        };
+        match written {
             Ok(()) => {
                 self.status = format!("Saved {}", path.display());
                 self.source = Some(path);
@@ -201,6 +219,9 @@ impl eframe::App for Studio {
                 }
                 if ui.button("Save .ezd").clicked() {
                     self.save();
+                }
+                if ui.button("Save .dxf").clicked() {
+                    self.save_dxf();
                 }
                 if ui.button("Fit").clicked() {
                     self.fit_next = true;

@@ -563,6 +563,7 @@ fn push_path(
     };
     doc.paths.push(PathObj {
         name,
+        layer: String::new(),
         pen,
         contours,
     });

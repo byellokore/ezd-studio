@@ -34,7 +34,7 @@ flowchart LR
 | Module | Role |
 | --- | --- |
 | `geom` | The only drawing model. Coordinates are millimeters, Y up. |
-| `dxf` | ASCII DXF to `Document`. Centers the result on the origin. |
+| `dxf` | ASCII DXF import and export. Import centers the result on the origin. |
 | `ezd` | `.ezd` reader, writer, Huffman coder, pen template. |
 | `lib` | `Error`, `open_drawing`, and the public re-exports. |
 | `main` | eframe 0.31 window. Depends on the library. The library does not depend on the window. |
@@ -59,6 +59,7 @@ classDiagram
     }
     class PathObj {
         name: String
+        layer: String
         pen: usize
         contours: Vec of Contour
     }
@@ -81,7 +82,7 @@ classDiagram
 
 `Document::new` builds 256 pens. The first eight colors repeat: black, blue, red, green, magenta, yellow, cyan, gray. Defaults are 500 mm/s, 50 percent power, 20 kHz, one pass. Those match the pen-0 values in the sample EzCad job that produced `pen_template.bin`.
 
-A path is one named object on one pen. A contour is one polyline. Closed contours are flagged. The writer repeats the first point at the end when the gap is larger than `1e-8`.
+A path is one named object on one pen. `layer` is the DXF camada. It is empty for a path read from `.ezd`. A contour is one polyline. Closed contours are flagged. The `.ezd` writer repeats the first point at the end when the gap is larger than `1e-8`.
 
 `notes` holds text strings found inside an opened `.ezd`. The letter outlines, when the file contains them, are ordinary paths. Saving does not write `notes` back as text objects. See [Continuing the work](continuing.md).
 
@@ -109,6 +110,9 @@ sequenceDiagram
     User->>Window: Save .ezd
     Window->>Library: write_ezd(path, document)
     Library-->>Window: file on disk
+    User->>Window: Save .dxf
+    Window->>Library: write_dxf(path, document)
+    Library-->>Window: file on disk
 ```
 
 The window keeps one `Document`, the last path, the selected path index, and the pan and zoom. Drag pans. Scroll zooms around the pointer, clamped from 0.2 to 80 pixels per millimeter. A click selects the nearest segment within 1.5 mm. Fit runs after open and after center.
@@ -119,7 +123,7 @@ The font loader reads `/System/Library/Fonts/Supplemental/Arial Unicode.ttf` whe
 
 ## What a save keeps
 
-Saving always builds a new file:
+**Save .ezd** builds a new EzCad file:
 
 1. A 344-byte `EZCADUNI` header, version word 2001.
 2. A 200 by 200 preview drawn from the current paths.
@@ -130,4 +134,6 @@ Saving always builds a new file:
 
 Groups, hatches, text objects, and images from an opened `.ezd` are not written back as those types. Their visible strokes survive only when the reader already turned them into `PathObj` contours. Quadratic and cubic curve segments are sampled to polylines on read (eight steps per span), so a later save stores the samples.
 
-Byte layout, object types, and the Huffman table are in [EZD format](ezd-format.md). Import rules are in [DXF import](dxf-import.md).
+**Save .dxf** writes an ASCII AC1021 file in millimeters. Each contour is an `LWPOLYLINE` on the path's camada. The layer color is the pen color shared by most paths on that camada, stored as ACI group 62 and true color group 420. A path with a different pen color carries groups 62 and 420 on the entity. A path with an empty layer uses the pen name as the layer. Hatches are not written. Splines and arcs are already polylines.
+
+Byte layout, object types, and the Huffman table are in [EZD format](ezd-format.md). Import and export rules are in [DXF import](dxf-import.md).

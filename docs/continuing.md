@@ -31,7 +31,7 @@ Checked on this Mac:
 - `cargo test` passes when `../AUTOSAVE.EZD` and the Bonequinha DXF are present.
 - The reader consumes the whole sample vector stream, including the hatch cached group.
 - A written square, and the imported Bonequinha drawing, read back with the same bounds and the edited pen numbers.
-- The window starts, opens drawings, and saves `.ezd`.
+- The window starts, opens drawings, and saves `.ezd`. Save .dxf is covered by the library tests. The button itself was not clicked in a live window.
 
 Not checked:
 
@@ -105,7 +105,7 @@ Preview pixels are a convenience thumbnail. A wrong preview is unlikely to be wh
 
 ## Project boundary
 
-This repository is the file tool: open DXF, open `.ezd`, edit pens, save `.ezd`.
+This repository is the file tool: open DXF, open `.ezd`, edit pens, save `.ezd` or `.dxf`.
 
 It does not emulate a printer, a USB control card, or a license check. EzCad talks to its marker through its own library, not through the Windows print spooler. Work that continues here stays on the document model, the two file formats, the window, and tests.
 

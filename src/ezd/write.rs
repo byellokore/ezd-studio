@@ -415,6 +415,7 @@ mod tests {
         let mut doc = Document::new("square");
         doc.paths.push(PathObj {
             name: "Box".into(),
+            layer: String::new(),
             pen: 2,
             contours: vec![Contour {
                 closed: true,

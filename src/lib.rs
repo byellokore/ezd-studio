@@ -1,10 +1,10 @@
-//! Read EzCad `.ezd` jobs and DXF drawings, and write an `.ezd` EzCad can open.
+//! Read EzCad `.ezd` jobs and DXF drawings, and write `.ezd` and `.dxf`.
 
 mod dxf;
 mod ezd;
 mod geom;
 
-pub use dxf::read_dxf;
+pub use dxf::{read_dxf, write_dxf};
 pub use ezd::{read_ezd, write_ezd};
 pub use geom::{Bounds, Contour, Document, PathObj, Pen};
 
@@ -65,6 +65,11 @@ mod tests {
             bounds.height()
         );
         assert!(bounds.center()[0].abs() < 1.0 && bounds.center()[1].abs() < 1.0);
+        assert!(
+            doc.paths.iter().all(|path| path.layer == "Camada 1"),
+            "layers {:?}",
+            doc.paths.iter().map(|path| &path.layer).collect::<Vec<_>>()
+        );
         let saved = std::env::temp_dir().join("ezd-studio-bonequinha.ezd");
         write_ezd(&saved, &doc).expect("write dxf as ezd");
         let again = read_ezd(&saved).expect("reread ezd");
@@ -72,6 +77,15 @@ mod tests {
         assert!((again_bounds.width() - bounds.width()).abs() < 0.05);
         assert!((again_bounds.height() - bounds.height()).abs() < 0.05);
         let _ = std::fs::remove_file(saved);
+        let dxf = std::env::temp_dir().join("ezd-studio-bonequinha.dxf");
+        write_dxf(&dxf, &doc).expect("write dxf");
+        let from_dxf = read_dxf(&dxf).expect("reread dxf");
+        let dxf_bounds = from_dxf.bounds().expect("dxf bounds");
+        assert_eq!(from_dxf.paths.len(), doc.paths.len());
+        assert!(from_dxf.paths.iter().all(|path| path.layer == "Camada 1"));
+        assert!((dxf_bounds.width() - bounds.width()).abs() < 0.05);
+        assert!((dxf_bounds.height() - bounds.height()).abs() < 0.05);
+        let _ = std::fs::remove_file(dxf);
     }
 }
 

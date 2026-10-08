@@ -63,11 +63,17 @@ fn encode(doc: &Document) -> Vec<u8> {
     let vectors_at = i32::try_from(out.len()).unwrap_or(0);
     let data_start = vectors_at + 20;
     let payload_len = i32::try_from(compressed.len().saturating_sub(2 + 256 * 7)).unwrap_or(0);
-    out.extend_from_slice(&(vectors.len() as u32).to_le_bytes());
-    out.extend_from_slice(&0_u32.to_le_bytes());
-    out.extend_from_slice(&(payload_len as u32).to_le_bytes());
-    out.extend_from_slice(&(data_start as u32).to_le_bytes());
-    out.extend_from_slice(&0_u32.to_le_bytes());
+    // Word 2 sits inside the 16 bytes that word 5 covers, so the content
+    // checksum has to be finished before the header checksum.
+    let content_crc = u32::from(crc16_x25(&vectors));
+    let mut vector_header = [0_u8; 20];
+    vector_header[0..4].copy_from_slice(&(vectors.len() as u32).to_le_bytes());
+    vector_header[4..8].copy_from_slice(&content_crc.to_le_bytes());
+    vector_header[8..12].copy_from_slice(&(payload_len as u32).to_le_bytes());
+    vector_header[12..16].copy_from_slice(&(data_start as u32).to_le_bytes());
+    let header_crc = u32::from(crc16_x25(&vector_header[..16]));
+    vector_header[16..20].copy_from_slice(&header_crc.to_le_bytes());
+    out.extend_from_slice(&vector_header);
     out.extend_from_slice(&compressed);
 
     put_i32(&mut out, seek_at, preview_at);
@@ -83,6 +89,38 @@ fn encode(doc: &Document) -> Vec<u8> {
 fn put_i32(buf: &mut [u8], at: usize, value: i32) {
     buf[at..at + 4].copy_from_slice(&value.to_le_bytes());
 }
+
+/// CRC-16/X-25: reflected polynomial 0x8408, init 0xFFFF, xorout 0xFFFF.
+///
+/// EzCad stores this in the low 16 bits of vector-header words 2 and 5.
+fn crc16_x25(data: &[u8]) -> u16 {
+    let mut crc = 0xFFFF_u16;
+    for &byte in data {
+        let index = usize::from((crc ^ u16::from(byte)) & 0xFF);
+        crc = CRC16_X25[index] ^ (crc >> 8);
+    }
+    crc ^ 0xFFFF
+}
+
+const CRC16_X25: [u16; 256] = {
+    let mut table = [0_u16; 256];
+    let mut index = 0_u16;
+    while index < 256 {
+        let mut value = index;
+        let mut bit = 0;
+        while bit < 8 {
+            if value & 1 == 1 {
+                value = (value >> 1) ^ 0x8408;
+            } else {
+                value >>= 1;
+            }
+            bit += 1;
+        }
+        table[index as usize] = value;
+        index += 1;
+    }
+    table
+};
 
 fn encode_vectors(doc: &Document) -> Vec<u8> {
     let mut out = Vec::new();
@@ -312,18 +350,7 @@ mod tests {
 
     #[test]
     fn round_trip_square_keeps_the_corners() {
-        let mut doc = Document::new("square");
-        doc.paths.push(PathObj {
-            name: "Box".into(),
-            pen: 2,
-            contours: vec![Contour {
-                closed: true,
-                pts: vec![[-10.0, -5.0], [10.0, -5.0], [10.0, 5.0], [-10.0, 5.0]],
-            }],
-        });
-        doc.pens[2].power = 33.0;
-        doc.pens[2].speed = 800.0;
-        doc.pens[2].frequency_khz = 40.0;
+        let doc = square_doc();
         let path = std::env::temp_dir().join("ezd-studio-square.ezd");
         write_ezd(&path, &doc).expect("write");
         let loaded = read_ezd(&path).expect("read");
@@ -336,5 +363,82 @@ mod tests {
         assert!((loaded.pens[2].speed - 800.0).abs() < 1e-6);
         assert!((loaded.pens[2].frequency_khz - 40.0).abs() < 1e-6);
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn crc16_x25_matches_the_catalog_check_value() {
+        // CRC-16/X-25 check value and residue from the CRC catalogue.
+        assert_eq!(crc16_x25(b"123456789"), 0x906E);
+        assert!(x25_residue_matches(b"123456789", 0x906E));
+    }
+
+    #[test]
+    fn written_vector_header_carries_both_checksums() {
+        let doc = square_doc();
+        let bytes = encode(&doc);
+        let vectors_at = le_u32(&bytes, 364) as usize;
+        let header = &bytes[vectors_at..vectors_at + 20];
+        let vectors = encode_vectors(&doc);
+        let content_crc = le_u32(header, 4);
+        let header_crc = le_u32(header, 16);
+        assert_eq!(le_u32(header, 0), vectors.len() as u32);
+        assert_eq!(content_crc, u32::from(crc16_x25(&vectors)));
+        assert_eq!(header_crc, u32::from(crc16_x25(&header[..16])));
+        assert_ne!(content_crc, 0);
+        assert_ne!(header_crc, 0);
+        assert!(x25_residue_matches(&vectors, content_crc as u16));
+        assert!(x25_residue_matches(&header[..16], header_crc as u16));
+    }
+
+    #[test]
+    fn sample_autosave_checksums_match_ezcad() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../AUTOSAVE.EZD");
+        let bytes = fs::read(&path).expect("sample autosave");
+        let vectors_at = le_u32(&bytes, 364) as usize;
+        let header = &bytes[vectors_at..vectors_at + 20];
+        let uncompressed = le_u32(header, 0) as usize;
+        let content_crc = le_u32(header, 4);
+        let header_crc = le_u32(header, 16);
+        assert_eq!(header_crc, u32::from(crc16_x25(&header[..16])));
+        assert!(x25_residue_matches(&header[..16], header_crc as u16));
+        let mut cursor = super::super::Cursor {
+            data: &bytes,
+            pos: vectors_at + 20,
+        };
+        let decoded = super::super::huffman_decode(&mut cursor, uncompressed).expect("decode");
+        assert_eq!(decoded.len(), uncompressed);
+        assert_eq!(content_crc, u32::from(crc16_x25(&decoded)));
+        assert!(x25_residue_matches(&decoded, content_crc as u16));
+    }
+
+    fn square_doc() -> Document {
+        let mut doc = Document::new("square");
+        doc.paths.push(PathObj {
+            name: "Box".into(),
+            pen: 2,
+            contours: vec![Contour {
+                closed: true,
+                pts: vec![[-10.0, -5.0], [10.0, -5.0], [10.0, 5.0], [-10.0, 5.0]],
+            }],
+        });
+        doc.pens[2].power = 33.0;
+        doc.pens[2].speed = 800.0;
+        doc.pens[2].frequency_khz = 40.0;
+        doc
+    }
+
+    fn le_u32(bytes: &[u8], at: usize) -> u32 {
+        u32::from_le_bytes(bytes[at..at + 4].try_into().expect("4 bytes"))
+    }
+
+    /// EzCad's check: fold the stored CRC in after the data, with no final XOR,
+    /// and require the residue 0xF0B8.
+    fn x25_residue_matches(data: &[u8], stored: u16) -> bool {
+        let mut crc = 0xFFFF_u16;
+        for byte in data.iter().copied().chain(stored.to_le_bytes()) {
+            let index = usize::from((crc ^ u16::from(byte)) & 0xFF);
+            crc = CRC16_X25[index] ^ (crc >> 8);
+        }
+        crc == 0xF0B8
     }
 }

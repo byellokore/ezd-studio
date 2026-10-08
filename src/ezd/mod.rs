@@ -1,8 +1,8 @@
 //! EzCad 2 `.ezd` reader and writer.
 //!
 //! The vector section is a Huffman-compressed stream of objects. Curves are the
-//! mark paths. This module reads those paths and writes a file EzCad 2.14 can
-//! open: header, pens, preview, and compressed curves.
+//! mark paths. This module reads those paths and writes the EzCad 2.14 Unicode
+//! layout: header, pens, preview, and compressed curves.
 
 mod read;
 mod write;

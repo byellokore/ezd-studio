@@ -15,7 +15,7 @@ DXF import keeps lines, polylines, arcs, circles, ellipses, and splines, and it 
 
 Pen speed is mm/s, power is percent, and frequency is kHz. Those values are stored in EzCad's 256-pen table. The field size in the window is a view guide. Saving does not write that size into the file.
 
-This Mac cannot run EzCad, so open the saved `.ezd` in EzCad 2 on Windows to confirm the machine accepts it. Files written here use a simple Huffman table and two header words set to zero. Our reader accepts them. EzCad on Windows has not been checked.
+This Mac cannot run EzCad, so open a newly saved `.ezd` in EzCad 2 on Windows to confirm the machine accepts it. The vector section uses an identity Huffman table. Its two checksum words are CRC-16/X-25 of the raw object bytes and of the first 16 header bytes. A file EzCad saved matches that algorithm. Windows has not yet reopened a file written after the checksums were filled in.
 
 The crate license in `Cargo.toml` is MIT. Rust 1.80 or newer is required. This tree was built with rustc 1.99.
 

@@ -35,7 +35,7 @@ Checked on this Mac:
 
 Not checked:
 
-- EzCad 2 on Windows has never opened a file this writer produced. Identity Huffman and the two zero header words may be accepted, or they may not. That check needs the Windows program and a real or licensed controller setup. Do it before treating a saved file as production.
+- EzCad 2 on Windows has not reopened a file written after the checksum fix. The dialog "Fail to pass Data verification error,maybe the file is damaged!" was the two vector-header words stored as zero. The writer now fills them with CRC-16/X-25. Open a newly saved file in EzCad before treating it as production. A different message after that would point at the identity Huffman table.
 - Re-saving is not byte-identical. Bezier contours become polylines. Text, hatch, group, and image objects are not rewritten as those types.
 - `field_mm` is display-only.
 
@@ -98,8 +98,8 @@ If Windows EzCad rejects a file that our reader accepts, compare it with a small
 1. Header magic and the 2001 version word.
 2. Seek offsets against the real section starts. The file should be packed.
 3. Pen 0 still parses as 61 fields, and field 6 is a percent `f64`, not a scaled integer.
-4. Vector words 2 and 5. They are 0 in our writer and non-zero in the sample.
-5. The Huffman table. EzCad may require canonical codes rather than the identity table. A valid prefix code that our decoder can round-trip is the safest experiment. Do not copy the sample's compressed payload. It belongs to that drawing.
+4. Vector words 2 and 5. Word 2 is CRC-16/X-25 of the uncompressed object bytes. Word 5 is the same CRC of the first 16 header bytes. A zero in either word is the data-verification dialog.
+5. The Huffman table. EzCad checks the checksums before it builds the tree. If those words are right and EzCad still rejects the file, try a real prefix code that our decoder can round-trip. Do not copy the sample's compressed payload. It belongs to that drawing.
 
 Preview pixels are a convenience thumbnail. A wrong preview is unlikely to be why a job fails to mark, but a wrong vector section will.
 

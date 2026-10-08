@@ -100,12 +100,14 @@ Five `u32` words, then the Huffman payload:
 | Word | Sample | Writer |
 | --- | --- | --- |
 | uncompressed length | 1,318,532 | length of the raw object bytes |
-| unknown 2 | 31,893 | 0 |
+| content checksum | 31,893 | CRC-16/X-25 of the raw object bytes |
 | compressed payload length | 1,167,573 | byte length after the Huffman table |
 | data start | 323940 | absolute file offset of the `u16` table length, which is `vectors_at + 20` |
-| unknown 5 | 49,158 | 0 |
+| header checksum | 49,158 | CRC-16/X-25 of the first 16 header bytes |
 
-Unknown 2 and unknown 5 are copied from the sample's positions and stored as 0. Whether EzCad requires the sample's values is untested. If a written file opens in our reader and fails in EzCad, these two words are the first place to look, together with the identity Huffman table.
+EzCad checks these two words on open. The dialog "Fail to pass Data verification error,maybe the file is damaged!" is that check failing. The content checksum covers the uncompressed object bytes. The header checksum covers the 16 bytes before it: uncompressed length, content checksum, payload length, and data start. It does not cover itself. Both are CRC-16/X-25 (reflected polynomial 0x8408, initial value 0xFFFF, final XOR 0xFFFF), stored in the low 16 bits of the `u32`. The sample values 31,893 and 49,158 are the checksums of `AUTOSAVE.EZD`, not constants. Compute the content checksum first, because those bytes sit inside the 16-byte header region.
+
+The header check runs before EzCad builds the Huffman tree. A later rejection with a different message would point at the table, not these words.
 
 ### Huffman
 

@@ -1,0 +1,17 @@
+[package]
+name = "ezd-studio"
+version = "0.1.0"
+edition = "2021"
+description = "Read DXF and EzCad .ezd drawings on macOS and save EzCad jobs"
+license = "MIT"
+rust-version = "1.80"
+
+[dependencies]
+eframe = "0.31"
+rfd = "0.15"
+thiserror = "2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

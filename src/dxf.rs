@@ -24,10 +24,10 @@ use crate::geom::{palette_color, Contour, Document, PathObj};
 use crate::{Error, Result};
 
 /// A stored polyline stays within this distance of the true DXF curve.
-const CHORD_TOLERANCE_MM: f64 = 0.01;
+const CHORD_TOLERANCE_MM: f64 = 0.001;
 
-/// Eight splits is 256 segments on one spline span.
-const MAX_FLATTEN_DEPTH: u32 = 8;
+/// Twelve splits is 4096 segments on one spline span.
+const MAX_FLATTEN_DEPTH: u32 = 12;
 
 /// A huge radius cannot ask for more samples than this.
 const MAX_ARC_STEPS: usize = 2048;
@@ -839,14 +839,28 @@ fn flatten_span(
         return;
     }
     let end = curve.point(right);
-    let mid_u = (left + right) * 0.5;
-    let mid = curve.point(mid_u);
-    if chord_gap(mid, start, end) <= CHORD_TOLERANCE_MM {
+    if span_is_flat(curve, left, right, start, end) {
         pts.push(start);
         return;
     }
+    let mid_u = (left + right) * 0.5;
     flatten_span(pts, curve, left, mid_u, depth + 1);
     flatten_span(pts, curve, mid_u, right, depth + 1);
+}
+
+/// An S-shaped span can cross its chord in the middle and still bow on both sides.
+/// The quarter points catch that bow; the midpoint alone treats it as a straight cut.
+fn span_is_flat(
+    curve: &SplineSpan<'_>,
+    left: f64,
+    right: f64,
+    start: [f64; 2],
+    end: [f64; 2],
+) -> bool {
+    let width = right - left;
+    [0.25, 0.5, 0.75].into_iter().all(|fraction| {
+        chord_gap(curve.point(left + width * fraction), start, end) <= CHORD_TOLERANCE_MM
+    })
 }
 
 impl SplineSpan<'_> {

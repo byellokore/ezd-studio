@@ -45,7 +45,7 @@ When you report a result, say which of those checks you actually ran.
 ## Limits to keep in mind
 
 - No EZText writer and no font shaping. Notes are read-only labels. Editing a note does not move glyph outlines.
-- Quadratic and cubic EZD curves are flattened with 8 steps. DXF splines, arcs, circles, ellipses, and bulges are flattened until the chord sits within 0.01 mm of the curve. Both lose the original controls.
+- Quadratic and cubic EZD curves are flattened with 8 steps. DXF splines, arcs, circles, ellipses, and bulges are flattened until the chord sits within 0.001 mm of the curve. Both lose the original controls.
 - DXF hatches are skipped on purpose.
 - Old-style POLYLINE plus VERTEX is not imported. `is_geometry` names `POLYLINE`, and `contours_of` returns nothing for it.
 - Nested INSERT is dropped.

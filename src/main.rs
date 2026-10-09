@@ -1,7 +1,8 @@
 //! macOS window for opening DXF and EzCad drawings and saving `.ezd` or `.dxf`.
 
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Shape, Stroke, Vec2};
-use ezd_studio::{open_drawing, write_dxf, write_ezd, Document, Pen};
+use ezd_studio::{fill_triangles, open_drawing, write_dxf, write_ezd, Document, Pen};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 fn main() -> eframe::Result {
@@ -111,6 +112,10 @@ struct Studio {
     doc: Document,
     source: Option<PathBuf>,
     selected: Option<usize>,
+    /// Paths whose closed contours are painted solid with their pen color.
+    filled: HashSet<usize>,
+    /// Triangle indices for each filled path, one list per contour.
+    fill_cache: HashMap<usize, Vec<Vec<[u32; 3]>>>,
     view: View,
     status: String,
     fit_next: bool,
@@ -122,6 +127,8 @@ impl Studio {
             doc: Document::new("Untitled"),
             source: None,
             selected: None,
+            filled: HashSet::new(),
+            fill_cache: HashMap::new(),
             view: View {
                 center_x: 0.0,
                 center_y: 0.0,
@@ -147,6 +154,8 @@ impl Studio {
                 self.doc = doc;
                 self.source = Some(path);
                 self.selected = None;
+                self.filled.clear();
+                self.fill_cache.clear();
                 self.fit_next = true;
             }
             Err(err) => self.status = err.to_string(),
@@ -196,6 +205,46 @@ impl Studio {
             Err(err) => self.status = err.to_string(),
         }
     }
+
+    fn toggle_fill(&mut self) {
+        let Some(index) = self.selected else {
+            self.status = "Select a path, then press ⌘F to fill it.".to_owned();
+            return;
+        };
+        let name = self
+            .doc
+            .paths
+            .get(index)
+            .map(|path| path.name.clone())
+            .unwrap_or_else(|| "path".to_owned());
+        if self.filled.remove(&index) {
+            self.fill_cache.remove(&index);
+            self.status = format!("Cleared the fill on {name}");
+            return;
+        }
+        let Some(path) = self.doc.paths.get(index) else {
+            self.status = "Select a path, then press ⌘F to fill it.".to_owned();
+            return;
+        };
+        let parts: Vec<Vec<[u32; 3]>> = path
+            .contours
+            .iter()
+            .map(|contour| {
+                if contour.closed && contour.pts.len() >= 3 {
+                    fill_triangles(&contour.pts)
+                } else {
+                    Vec::new()
+                }
+            })
+            .collect();
+        if parts.iter().all(Vec::is_empty) {
+            self.status = format!("{name} is open, so there is no inside to fill");
+            return;
+        }
+        self.filled.insert(index);
+        self.fill_cache.insert(index, parts);
+        self.status = format!("Filled {name} with its pen color");
+    }
 }
 
 impl eframe::App for Studio {
@@ -205,6 +254,9 @@ impl eframe::App for Studio {
         }
         if ctx.input(|input| input.modifiers.command && input.key_pressed(egui::Key::S)) {
             self.save();
+        }
+        if ctx.input(|input| input.modifiers.command && input.key_pressed(egui::Key::F)) {
+            self.toggle_fill();
         }
 
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
@@ -355,6 +407,24 @@ impl eframe::App for Studio {
                     }
                 });
                 ui.add_space(8.0);
+                ui.separator();
+                ui.label("Fill");
+                let filled = self
+                    .selected
+                    .is_some_and(|index| self.filled.contains(&index));
+                let fill_label = if filled { "Clear fill" } else { "Fill inside" };
+                if ui
+                    .add_enabled(self.selected.is_some(), egui::Button::new(fill_label))
+                    .clicked()
+                {
+                    self.toggle_fill();
+                }
+                ui.label(
+                    egui::RichText::new("⌘F fills the selected path with its pen color. The saved file still marks the outline.")
+                        .small()
+                        .weak(),
+                );
+                ui.add_space(8.0);
                 ui.label(
                     egui::RichText::new("Speed is mm/s. Power is percent. Frequency is kHz. EzCad on Windows is where you confirm the file opens on the machine.")
                         .small()
@@ -388,7 +458,14 @@ impl eframe::App for Studio {
                     self.view.center_y += before[1] - after[1];
                 }
             }
-            paint_field(ui, available, &self.view, &self.doc, self.selected);
+            paint_field(
+                ui,
+                available,
+                &self.view,
+                &self.doc,
+                self.selected,
+                &self.fill_cache,
+            );
             if response.clicked() {
                 if let Some(pointer) = response.interact_pointer_pos() {
                     self.selected = pick_path(&self.doc, &self.view, available.center(), pointer);
@@ -441,7 +518,14 @@ fn pen_color(pens: &[Pen], index: usize) -> Color32 {
     })
 }
 
-fn paint_field(ui: &egui::Ui, rect: Rect, view: &View, doc: &Document, selected: Option<usize>) {
+fn paint_field(
+    ui: &egui::Ui,
+    rect: Rect,
+    view: &View,
+    doc: &Document,
+    selected: Option<usize>,
+    fills: &HashMap<usize, Vec<Vec<[u32; 3]>>>,
+) {
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, Color32::from_rgb(214, 210, 200));
     let origin = rect.center();
@@ -491,6 +575,21 @@ fn paint_field(ui: &egui::Ui, rect: Rect, view: &View, doc: &Document, selected:
         } else {
             Stroke::new(1.15_f32, color)
         };
+        if let Some(parts) = fills.get(&index) {
+            for (contour, tris) in path.contours.iter().zip(parts.iter()) {
+                if tris.is_empty() {
+                    continue;
+                }
+                let mut mesh = egui::Mesh::default();
+                for pt in &contour.pts {
+                    mesh.colored_vertex(view.to_screen(pt[0], pt[1], origin), color);
+                }
+                for tri in tris {
+                    mesh.add_triangle(tri[0], tri[1], tri[2]);
+                }
+                painter.add(Shape::mesh(mesh));
+            }
+        }
         for contour in &path.contours {
             if contour.pts.len() < 2 {
                 continue;

@@ -117,7 +117,7 @@ sequenceDiagram
 
 The window keeps one `Document`, the last path, the selected path index, and the pan and zoom. Drag pans. Scroll zooms around the pointer, clamped from 0.2 to 80 pixels per millimeter. A click selects the nearest segment within 1.5 mm. Fit runs after open and after center.
 
-The right panel edits the pen of the selected path. Pens 0 through 7 can be assigned from the combo box or the palette. Every path that shares a pen index shares that pen's speed, power, frequency, passes, color, and name.
+The right panel edits the pen of the selected path. Pens 0 through 7 can be assigned from the combo box or the palette. Every path that shares a pen index shares that pen's speed, power, frequency, passes, color, and name. **Fill inside** (⌘F) paints the inside of the selected closed path with that pen color. Press it again to clear the fill. The fill is only on screen. Save still writes the outline.
 
 The font loader reads `/System/Library/Fonts/Supplemental/Arial Unicode.ttf` when it is present, so notes that contain CJK text can draw. If the file is missing, egui keeps its default font and the window still opens.
 

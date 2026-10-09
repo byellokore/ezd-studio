@@ -31,10 +31,10 @@ Only the ENTITIES section becomes model space. A block is stored and drawn when 
 | --- | --- |
 | LINE | one open contour, groups 10/20 and 11/21 |
 | LWPOLYLINE | one contour. Flag 70 bit 0 closes it. Group 42 bulge becomes arc samples |
-| CIRCLE | closed loop, group 40 radius, about one sample every 22.5 degrees |
-| ARC | open sweep from group 50 to 51, degrees, counterclockwise |
-| ELLIPSE | major axis 11/21, ratio 40, parameters 41 and 42, 72 steps, then rotated |
-| SPLINE | degree-3 de Boor, 4 samples on each non-empty knot span. Weights from group 41 when present |
+| CIRCLE | closed loop, group 40 radius, sampled so each chord stays within 0.01 mm |
+| ARC | open sweep from group 50 to 51, degrees, counterclockwise, same 0.01 mm chord |
+| ELLIPSE | major axis 11/21, ratio 40, parameters 41 and 42, sampled to the same 0.01 mm chord, then rotated |
+| SPLINE | degree-3 de Boor. Each knot span is subdivided until the chord is within 0.01 mm. Weights from group 41 when present |
 | INSERT | each supported child, transformed. Nested INSERT inside a block is dropped |
 | POINT | recognized and then discarded. A point is not a mark path |
 | POLYLINE / VERTEX | one contour. Vertices are collected until `SEQEND`. Flag 70 bit 0 closes it. Group 42 bulge on a VERTEX is sampled like an `LWPOLYLINE` bulge. Polygon and polyface meshes are skipped |
@@ -42,7 +42,7 @@ Only the ENTITIES section becomes model space. A block is stored and drawn when 
 
 SPLINE flags: bit 0 (closed) marks the contour closed. A contour is also closed when the first and last samples are under 0.05 mm apart. If the knot vector is too short, or the degree is 1, the control points are used as a polyline. If there are no control points, fit points (groups 11 and 21) are the polyline. Samples closer than 0.002 mm are removed.
 
-LWPOLYLINE bulge uses the usual arc: included angle is `4 * atan(bulge)`, and the step count follows the sweep between 4 and 64.
+LWPOLYLINE bulge uses the usual arc: included angle is `4 * atan(bulge)`, and the step count keeps that chord within 0.01 mm.
 
 INSERT reads the block name (group 2), insert point (10/20), scales (41 and 42, default 1), and rotation (50, degrees). Each child point is scaled, then rotated, then translated. There is no block base-point correction beyond that. The Bonequinha `Block_0` base is the origin, so this matches that file. A block whose base is not the origin will land in the wrong place until group 10/20 of the BLOCK record is applied.
 

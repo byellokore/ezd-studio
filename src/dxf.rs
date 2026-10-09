@@ -23,6 +23,15 @@ use std::path::Path;
 use crate::geom::{palette_color, Contour, Document, PathObj};
 use crate::{Error, Result};
 
+/// A stored polyline stays within this distance of the true DXF curve.
+const CHORD_TOLERANCE_MM: f64 = 0.01;
+
+/// Eight splits is 256 segments on one spline span.
+const MAX_FLATTEN_DEPTH: u32 = 8;
+
+/// A huge radius cannot ask for more samples than this.
+const MAX_ARC_STEPS: usize = 2048;
+
 /// Read an ASCII DXF and center it on the 110 mm field.
 ///
 /// # Errors
@@ -613,9 +622,7 @@ fn append_bulge(pts: &mut Vec<[f64; 2]>, start: [f64; 2], end: [f64; 2], bulge: 
     let center_x = mid_x + sign * (-dy / chord) * offset;
     let center_y = mid_y + sign * (dx / chord) * offset;
     let start_angle = (start[1] - center_y).atan2(start[0] - center_x);
-    let steps = (theta.abs() / std::f64::consts::FRAC_PI_8)
-        .ceil()
-        .clamp(4.0, 64.0) as usize;
+    let steps = steps_for_sweep(radius.abs(), theta.abs());
     for step in 1..=steps {
         let angle = start_angle + theta * (step as f64 / steps as f64);
         pts.push([
@@ -690,7 +697,7 @@ fn ellipse(entity: &Entity) -> Vec<Contour> {
     let (sin, cos) = angle.sin_cos();
     let minor = major * ratio;
     let closed = (end - start).abs() >= std::f64::consts::TAU - 1e-3;
-    let steps = 72;
+    let steps = steps_for_sweep(major.max(minor.abs()), end - start);
     let mut pts = Vec::with_capacity(steps + 1);
     for step in 0..=steps {
         let t = start + (end - start) * (step as f64 / steps as f64);
@@ -703,9 +710,7 @@ fn ellipse(entity: &Entity) -> Vec<Contour> {
 
 fn arc_points(cx: f64, cy: f64, rx: f64, ry: f64, start: f64, end: f64, closed: bool) -> Contour {
     let sweep = end - start;
-    let steps = (sweep.abs() / std::f64::consts::FRAC_PI_8)
-        .ceil()
-        .clamp(12.0, 96.0) as usize;
+    let steps = steps_for_sweep(rx.abs().max(ry.abs()), sweep);
     let mut pts = Vec::with_capacity(steps + 1);
     for step in 0..=steps {
         let t = start + sweep * (step as f64 / steps as f64);
@@ -748,11 +753,19 @@ fn spline(entity: &Entity) -> Vec<Contour> {
         let left = knots[span];
         let right = knots[span + 1];
         if right > left {
-            let samples = 4;
-            for step in 0..samples {
-                let u = left + (right - left) * (step as f64 / samples as f64);
-                pts.push(de_boor(span, degree, u, &knots, &controls, &weights));
-            }
+            flatten_span(
+                &mut pts,
+                &SplineSpan {
+                    index: span,
+                    degree,
+                    knots: &knots,
+                    controls: &controls,
+                    weights: &weights,
+                },
+                left,
+                right,
+                0,
+            );
         }
         span += 1;
         if knots[span] > last_knot && span > degree {
@@ -771,6 +784,95 @@ fn spline(entity: &Entity) -> Vec<Contour> {
     let closed =
         flags & 1 == 1 || pts.len() >= 2 && dist(pts[0], *pts.last().unwrap_or(&pts[0])) < 0.05;
     vec![Contour { closed, pts }]
+}
+
+/// Step count whose circular chord stays within [`CHORD_TOLERANCE_MM`].
+///
+/// `sagitta = radius * (1 - cos(step / 2))`, so
+/// `step = 2 * acos(1 - tolerance / radius)`.
+fn steps_for_sweep(radius: f64, sweep: f64) -> usize {
+    let sweep = sweep.abs();
+    if sweep < 1e-12 {
+        return 1;
+    }
+    let radius = radius.abs();
+    if radius < 1e-12 {
+        return 1;
+    }
+    let ratio = (CHORD_TOLERANCE_MM / radius).min(2.0);
+    let step = 2.0 * (1.0 - ratio).clamp(-1.0, 1.0).acos();
+    let step = if step < 1e-6 {
+        std::f64::consts::TAU
+    } else {
+        step
+    };
+    let steps = (sweep / step).ceil();
+    let steps = if steps.is_finite() { steps } else { 1.0 };
+    let mut steps = steps.clamp(1.0, MAX_ARC_STEPS as f64) as usize;
+    // A full turn with one step is a point. Four sides still sit inside the tolerance
+    // once the radius itself is smaller than that tolerance.
+    if sweep >= std::f64::consts::TAU - 1e-3 {
+        steps = steps.max(4);
+    }
+    steps
+}
+
+struct SplineSpan<'a> {
+    index: usize,
+    degree: usize,
+    knots: &'a [f64],
+    controls: &'a [[f64; 2]],
+    weights: &'a [f64],
+}
+
+/// Push the start of each flat piece. The caller pushes the span's final point once.
+fn flatten_span(
+    pts: &mut Vec<[f64; 2]>,
+    curve: &SplineSpan<'_>,
+    left: f64,
+    right: f64,
+    depth: u32,
+) {
+    let start = curve.point(left);
+    if depth >= MAX_FLATTEN_DEPTH {
+        pts.push(start);
+        return;
+    }
+    let end = curve.point(right);
+    let mid_u = (left + right) * 0.5;
+    let mid = curve.point(mid_u);
+    if chord_gap(mid, start, end) <= CHORD_TOLERANCE_MM {
+        pts.push(start);
+        return;
+    }
+    flatten_span(pts, curve, left, mid_u, depth + 1);
+    flatten_span(pts, curve, mid_u, right, depth + 1);
+}
+
+impl SplineSpan<'_> {
+    fn point(&self, u: f64) -> [f64; 2] {
+        de_boor(
+            self.index,
+            self.degree,
+            u,
+            self.knots,
+            self.controls,
+            self.weights,
+        )
+    }
+}
+
+fn chord_gap(point: [f64; 2], start: [f64; 2], end: [f64; 2]) -> f64 {
+    let dx = end[0] - start[0];
+    let dy = end[1] - start[1];
+    let len2 = dx * dx + dy * dy;
+    if len2 < 1e-18 {
+        return dist(point, start);
+    }
+    let t = (((point[0] - start[0]) * dx + (point[1] - start[1]) * dy) / len2).clamp(0.0, 1.0);
+    let x = start[0] + t * dx - point[0];
+    let y = start[1] + t * dy - point[1];
+    (x * x + y * y).sqrt()
 }
 
 fn de_boor(
@@ -1333,6 +1435,104 @@ mod tests {
     #[test]
     fn layer_names_drop_characters_dxf_rejects() {
         assert_eq!(sanitize_layer("a/b:c"), "a_b_c");
+    }
+
+    #[test]
+    fn a_bent_spline_stays_within_the_chord_tolerance() {
+        let path = entities_dxf(
+            "ezd-studio-bent-spline.dxf",
+            &spline_entity(&[[0.0, 0.0], [0.0, 40.0], [40.0, 40.0], [40.0, 0.0]]),
+        );
+        let doc = read_dxf(&path).expect("read");
+        let pts = &doc.paths[0].contours[0].pts;
+        assert!(pts.len() > 2, "points {}", pts.len());
+        let knots = [0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
+        let controls = [[0.0, 0.0], [0.0, 40.0], [40.0, 40.0], [40.0, 0.0]];
+        let shift = [pts[0][0] - controls[0][0], pts[0][1] - controls[0][1]];
+        let mut worst = 0.0_f64;
+        for step in 0..=64 {
+            let sample = de_boor(3, 3, step as f64 / 64.0, &knots, &controls, &[]);
+            let sample = [sample[0] + shift[0], sample[1] + shift[1]];
+            let gap = pts
+                .windows(2)
+                .map(|window| chord_gap(sample, window[0], window[1]))
+                .fold(f64::MAX, f64::min);
+            worst = worst.max(gap);
+        }
+        assert!(worst <= CHORD_TOLERANCE_MM + 1e-6, "chord error {worst}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_straight_spline_stays_two_points() {
+        let path = entities_dxf(
+            "ezd-studio-straight-spline.dxf",
+            &spline_entity(&[[0.0, 0.0], [10.0, 0.0], [20.0, 0.0], [30.0, 0.0]]),
+        );
+        let doc = read_dxf(&path).expect("read");
+        assert_eq!(doc.paths[0].contours[0].pts.len(), 2);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_circle_stays_within_the_chord_tolerance() {
+        let path = entities_dxf(
+            "ezd-studio-circle.dxf",
+            "  0\nCIRCLE\n  8\n0\n 10\n0.0\n 20\n0.0\n 40\n25.0\n",
+        );
+        let doc = read_dxf(&path).expect("read");
+        let pts = &doc.paths[0].contours[0].pts;
+        assert!(pts.len() > 4, "points {}", pts.len());
+        let closing = dist(pts[0], *pts.last().expect("circle")) < 1e-6;
+        let body = if closing { &pts[..pts.len() - 1] } else { pts };
+        let (mut cx, mut cy) = (0.0, 0.0);
+        for point in body {
+            cx += point[0];
+            cy += point[1];
+        }
+        cx /= body.len() as f64;
+        cy /= body.len() as f64;
+        for point in body {
+            let radius = dist(*point, [cx, cy]);
+            assert!((radius - 25.0).abs() < 1e-4, "radius {radius}");
+        }
+        for window in pts.windows(2) {
+            if dist(window[0], window[1]) < 1e-9 {
+                continue;
+            }
+            let start = (window[0][1] - cy).atan2(window[0][0] - cx);
+            let end = (window[1][1] - cy).atan2(window[1][0] - cx);
+            let mut sweep = end - start;
+            if sweep < 0.0 {
+                sweep += std::f64::consts::TAU;
+            }
+            let mid_angle = start + sweep * 0.5;
+            let mid = [cx + 25.0 * mid_angle.cos(), cy + 25.0 * mid_angle.sin()];
+            let gap = chord_gap(mid, window[0], window[1]);
+            assert!(gap <= CHORD_TOLERANCE_MM + 1e-6, "sagitta {gap}");
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    fn entities_dxf(name: &str, entities: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(name);
+        let text = format!("  0\nSECTION\n  2\nENTITIES\n{entities}  0\nENDSEC\n  0\nEOF\n");
+        std::fs::write(&path, text).expect("write fixture");
+        path
+    }
+
+    fn spline_entity(controls: &[[f64; 2]]) -> String {
+        let mut out = String::from("  0\nSPLINE\n  8\n0\n 70\n8\n 71\n3\n");
+        for point in controls {
+            out.push_str(&format!(" 10\n{}\n 20\n{}\n", point[0], point[1]));
+        }
+        for _ in 0..4 {
+            out.push_str(" 40\n0.0\n");
+        }
+        for _ in 0..4 {
+            out.push_str(" 40\n1.0\n");
+        }
+        out
     }
 
     fn square_path(name: &str, layer: &str, pen: usize, x: f64) -> PathObj {

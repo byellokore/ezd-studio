@@ -132,7 +132,7 @@ The font loader reads `/System/Library/Fonts/Supplemental/Arial Unicode.ttf` whe
 5. One curve object per contour that has at least two points.
 6. A type-0 terminator.
 
-Groups, hatches, text objects, and images from an opened `.ezd` are not written back as those types. Their visible strokes survive only when the reader already turned them into `PathObj` contours. Quadratic and cubic curve segments are sampled to polylines on read (eight steps per span), so a later save stores the samples.
+Groups, hatches, text objects, and images from an opened `.ezd` are not written back as those types. Their visible strokes survive only when the reader already turned them into `PathObj` contours. Quadratic and cubic curve segments are sampled to polylines on read (eight steps per span), so a later save stores the samples. DXF splines, arcs, circles, ellipses, and bulges are flattened to a 0.01 mm chord on import, and that polyline is what a later save stores.
 
 **Save .dxf** writes an ASCII AutoCAD Release 12 file (`AC1009`) in millimeters. HEADER, TABLES, an empty BLOCKS section, and ENTITIES are all present. Each contour is a `POLYLINE` with `VERTEX` records and a `SEQEND`. A camada used by one pen stays one layer. A camada used by several pens is split, one layer per pen, because EzCad assigns one color to a layer. Every polyline carries ACI group 62. Group 420 is not written. A path with an empty layer uses the pen name as the layer. Hatches are not written. Splines and arcs are already polylines.
 

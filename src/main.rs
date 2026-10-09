@@ -500,6 +500,10 @@ fn paint_field(ui: &egui::Ui, rect: Rect, view: &View, doc: &Document, selected:
                 .iter()
                 .map(|pt| view.to_screen(pt[0], pt[1], origin))
                 .collect();
+            let points = simplify_stroke(&points);
+            if points.len() < 2 {
+                continue;
+            }
             if contour.closed {
                 painter.add(Shape::closed_line(points, stroke));
             } else {
@@ -507,6 +511,36 @@ fn paint_field(ui: &egui::Ui, rect: Rect, view: &View, doc: &Document, selected:
             }
         }
     }
+}
+
+/// Drop screen points that sit on top of each other so the stroke join does not crack.
+///
+/// The first and last point stay. This is only the preview; the stored contour is unchanged.
+fn simplify_stroke(points: &[Pos2]) -> Vec<Pos2> {
+    const MIN_PX: f32 = 0.75;
+    if points.len() <= 2 {
+        return points.to_vec();
+    }
+    let mut kept = Vec::with_capacity(points.len());
+    kept.push(points[0]);
+    for point in &points[1..points.len() - 1] {
+        if kept
+            .last()
+            .is_some_and(|last| last.distance(*point) < MIN_PX)
+        {
+            continue;
+        }
+        kept.push(*point);
+    }
+    let end = points[points.len() - 1];
+    if kept
+        .last()
+        .is_some_and(|last| last.distance(end) < f32::EPSILON)
+    {
+        return kept;
+    }
+    kept.push(end);
+    kept
 }
 
 fn pick_path(doc: &Document, view: &View, origin: Pos2, pointer: Pos2) -> Option<usize> {

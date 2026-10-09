@@ -35,7 +35,8 @@ Checked on this Mac:
 
 Not checked:
 
-- EzCad 2 on Windows has not reopened a file written after the checksum fix. The dialog "Fail to pass Data verification error,maybe the file is damaged!" was the two vector-header words stored as zero. The writer now fills them with CRC-16/X-25. Open a newly saved file in EzCad before treating it as production. A different message after that would point at the identity Huffman table.
+- EzCad 2 on Windows has not reopened a file written after the Huffman padding fix. The dialog "File's format is error,maybe damaged!" is OpenEzdFile return code 5. The identity stream was one byte short of what EzCad's decoder needs, so the decompressed length did not match. The writer now appends that byte. Open a newly saved `.ezd` in EzCad before treating it as production.
+- eDrawings rejected the old `.dxf` because it claimed `$ACADVER` AC1021 and then omitted every Release 2007 record (handles, subclass markers, CLASSES, BLOCKS, OBJECTS) and set `$DWGCODEPAGE` to `UTF-8`. The writer now emits Release 12 (`AC1009`, code page `ANSI_1252`): HEADER, TABLES, an empty BLOCKS section, and `POLYLINE` / `VERTEX` / `SEQEND` with ACI group 62. No group 420. A camada with several pens is still split. ezdxf 1.4.4 reads that file with zero audit errors. This Mac cannot run eDrawings or EzCad. Open a newly saved `.dxf` in both before treating it as accepted. In EzCad, Ungroup the VectorFile (Ctrl+U); the blue row is the container. The old `cores.salvas.dxf` on disk is the rejected file.
 - Re-saving is not byte-identical. Bezier contours become polylines. Text, hatch, group, and image objects are not rewritten as those types.
 - `field_mm` is display-only.
 

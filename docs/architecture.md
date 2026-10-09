@@ -134,6 +134,6 @@ The font loader reads `/System/Library/Fonts/Supplemental/Arial Unicode.ttf` whe
 
 Groups, hatches, text objects, and images from an opened `.ezd` are not written back as those types. Their visible strokes survive only when the reader already turned them into `PathObj` contours. Quadratic and cubic curve segments are sampled to polylines on read (eight steps per span), so a later save stores the samples.
 
-**Save .dxf** writes an ASCII AC1021 file in millimeters. Each contour is an `LWPOLYLINE` on the path's camada. The layer color is the pen color shared by most paths on that camada, stored as ACI group 62 and true color group 420. A path with a different pen color carries groups 62 and 420 on the entity. A path with an empty layer uses the pen name as the layer. Hatches are not written. Splines and arcs are already polylines.
+**Save .dxf** writes an ASCII AutoCAD Release 12 file (`AC1009`) in millimeters. HEADER, TABLES, an empty BLOCKS section, and ENTITIES are all present. Each contour is a `POLYLINE` with `VERTEX` records and a `SEQEND`. A camada used by one pen stays one layer. A camada used by several pens is split, one layer per pen, because EzCad assigns one color to a layer. Every polyline carries ACI group 62. Group 420 is not written. A path with an empty layer uses the pen name as the layer. Hatches are not written. Splines and arcs are already polylines.
 
 Byte layout, object types, and the Huffman table are in [EZD format](ezd-format.md). Import and export rules are in [DXF import](dxf-import.md).

@@ -186,21 +186,28 @@ fn read_vectors(bytes: &[u8], at: usize, doc: &mut Document) -> Result<()> {
         if kind == 0 {
             continue;
         }
-        parse_typed(&mut objects, kind, doc, &mut ordinal).map_err(|err| {
-            Error::Format(format!("{err} (object at decompressed byte {start})"))
-        })?;
+        parse_typed(&mut objects, kind, doc, &mut ordinal)
+            .map_err(|err| Error::Format(format!("{err} (object at decompressed byte {start})")))?;
     }
     Ok(())
 }
 
-fn parse_typed(cursor: &mut Cursor<'_>, kind: i32, doc: &mut Document, ordinal: &mut usize) -> Result<()> {
+fn parse_typed(
+    cursor: &mut Cursor<'_>,
+    kind: i32,
+    doc: &mut Document,
+    ordinal: &mut usize,
+) -> Result<()> {
     let header = cursor.struct_fields(64)?;
     let pen = header
         .first()
         .and_then(|bytes| i32_field(bytes))
         .unwrap_or(0)
         .clamp(0, 255) as usize;
-    let label = header.get(3).map(|bytes| utf16_lossy(bytes)).unwrap_or_default();
+    let label = header
+        .get(3)
+        .map(|bytes| utf16_lossy(bytes))
+        .unwrap_or_default();
     if matches!(kind, GROUP | HATCH | COMBINE | VECTOR_FILE | SPIRAL) {
         let children = cursor.i32()?;
         if !(0..=100_000).contains(&children) {
@@ -372,13 +379,7 @@ fn parse_rect(
             ordinal,
             vec![Contour {
                 closed: true,
-                pts: vec![
-                    min,
-                    [max[0], min[1]],
-                    max,
-                    [min[0], max[1]],
-                    min,
-                ],
+                pts: vec![min, [max[0], min[1]], max, [min[0], max[1]], min],
             }],
         );
     }
@@ -443,7 +444,10 @@ fn parse_polygon(
     ordinal: &mut usize,
 ) -> Result<()> {
     let fields = cursor.struct_fields(32)?;
-    let sides = fields.get(7).and_then(|bytes| i32_field(bytes)).unwrap_or(0);
+    let sides = fields
+        .get(7)
+        .and_then(|bytes| i32_field(bytes))
+        .unwrap_or(0);
     if let (Some(min), Some(max)) = (
         fields.get(1).and_then(|bytes| point_field(bytes)),
         fields.get(2).and_then(|bytes| point_field(bytes)),
@@ -478,10 +482,7 @@ fn circle_contour(center: [f64; 2], rx: f64, ry: f64) -> Contour {
     let mut pts = Vec::with_capacity(steps + 1);
     for step in 0..=steps {
         let theta = std::f64::consts::TAU * (step as f64) / (steps as f64);
-        pts.push([
-            center[0] + rx * theta.cos(),
-            center[1] + ry * theta.sin(),
-        ]);
+        pts.push([center[0] + rx * theta.cos(), center[1] + ry * theta.sin()]);
     }
     Contour { closed: true, pts }
 }
@@ -507,18 +508,28 @@ fn parse_text(cursor: &mut Cursor<'_>, doc: &mut Document) -> Result<()> {
     Ok(())
 }
 
-fn parse_hatch_tail(cursor: &mut Cursor<'_>, doc: &mut Document, ordinal: &mut usize) -> Result<()> {
+fn parse_hatch_tail(
+    cursor: &mut Cursor<'_>,
+    doc: &mut Document,
+    ordinal: &mut usize,
+) -> Result<()> {
     let _props = cursor.struct_fields(200)?;
     if cursor.remaining() < 4 {
         return Ok(());
     }
-    let next = i32::from_le_bytes(cursor.data[cursor.pos..cursor.pos + 4].try_into().expect("4"));
+    let next = i32::from_le_bytes(
+        cursor.data[cursor.pos..cursor.pos + 4]
+            .try_into()
+            .expect("4"),
+    );
     // The cached hatch group has no type code. Its header list length is 15.
     if next == 15 {
         let _header = cursor.struct_fields(64)?;
         let children = cursor.i32()?;
         if !(0..=100_000).contains(&children) {
-            return Err(Error::Format(format!("hatch cache has {children} children")));
+            return Err(Error::Format(format!(
+                "hatch cache has {children} children"
+            )));
         }
         for _ in 0..children {
             let child = cursor.i32()?;

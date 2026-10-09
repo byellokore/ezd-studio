@@ -4,11 +4,18 @@
 //! splines, including geometry pulled in by `INSERT`. Solid hatches are skipped
 //! because their boundaries repeat the splines already in the drawing.
 //!
-//! The writer emits one LWPOLYLINE per contour. A path keeps its DXF layer.
-//! A path that came from an `.ezd` has no layer, so it is written on a layer
-//! named after its pen. The layer color is that pen's RGB.
+//! The writer emits AutoCAD Release 12 (`AC1009`) ASCII: one `POLYLINE` /
+//! `VERTEX` / `SEQEND` per contour. Release 12 is the interchange DXF that
+//! eDrawings and EzCad open without handles or subclass markers. A file that
+//! claims `AC1021` and then omits those records is not a DXF those programs
+//! can load. Color is the ACI index (group 62). Group 420 is not a Release 12
+//! code, and a strict reader discards the drawing when it sees one. A camada
+//! used by one pen keeps its name. A camada used by several pens is split, one
+//! layer per pen, because EzCad assigns a single color to a layer. A path that
+//! came from an `.ezd` has no layer, so it is written on a layer named after
+//! its pen.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -54,12 +61,13 @@ pub fn read_dxf(path: &Path) -> Result<Document> {
     Ok(doc)
 }
 
-/// Write `doc` as an ASCII DXF, in millimeters.
+/// Write `doc` as an AutoCAD Release 12 ASCII DXF.
 ///
-/// Each contour becomes an `LWPOLYLINE`. The layer name is the path's camada.
-/// When the path has none, the layer is the pen name. The layer's color is the
-/// pen color used by most paths on that layer. A path whose pen color differs
-/// carries its own color on the entity.
+/// Coordinates are millimeters. Release 12 has no `$INSUNITS` variable, which
+/// is how laser and CAM programs exchange DXF. Each contour becomes a
+/// `POLYLINE` with `VERTEX` records and a `SEQEND`. The layer name is the
+/// path's camada. When the path has none, the layer is the pen name. The
+/// entity and the layer both carry the nearest ACI color (group 62).
 ///
 /// # Errors
 ///
@@ -81,6 +89,15 @@ struct Entity {
     ty: String,
     layer: String,
     fields: Vec<(i32, String)>,
+    /// Points taken from `VERTEX` records that follow a `POLYLINE`.
+    /// The polyline entity's own groups 10/20 are its elevation, not vertices.
+    vertices: Vec<PolylineVertex>,
+}
+
+struct PolylineVertex {
+    x: f64,
+    y: f64,
+    bulge: f64,
 }
 
 struct Block {
@@ -151,8 +168,24 @@ fn split_sections(
         let code = pairs[index].0.clone();
         let value = pairs[index].1.clone();
         if code == "0" {
-            flush(&mut current, &block_name, &mut block_ents, &mut model);
+            let continues_polyline = current
+                .as_ref()
+                .is_some_and(|entity| entity.ty == "POLYLINE")
+                && (value == "VERTEX" || value == "SEQEND");
+            if !continues_polyline {
+                flush(&mut current, &block_name, &mut block_ents, &mut model);
+            }
             match value.as_str() {
+                "VERTEX" if continues_polyline => {
+                    if let Some(entity) = current.as_mut() {
+                        absorb_vertex(entity, pairs, &mut index);
+                    }
+                    continue;
+                }
+                "SEQEND" if continues_polyline => {
+                    skip_until_next_entity(pairs, &mut index);
+                    continue;
+                }
                 "SECTION" => {
                     if let Some(("2", name)) = pairs.get(index + 1).map(|(c, v)| (c.as_str(), v)) {
                         section.clone_from(name);
@@ -213,6 +246,7 @@ fn split_sections(
                             ty: ty.to_owned(),
                             layer: String::new(),
                             fields: Vec::new(),
+                            vertices: Vec::new(),
                         });
                     }
                 }
@@ -239,6 +273,7 @@ fn read_record(pairs: &[(String, String)], index: &mut usize) -> Entity {
         ty,
         layer: String::new(),
         fields: Vec::new(),
+        vertices: Vec::new(),
     };
     while *index < pairs.len() && pairs[*index].0 != "0" {
         if let Ok(group) = pairs[*index].0.parse::<i32>() {
@@ -251,6 +286,36 @@ fn read_record(pairs: &[(String, String)], index: &mut usize) -> Entity {
         *index += 1;
     }
     entity
+}
+
+/// `index` points at the `0` / `VERTEX` pair. Leaves it on the next `0` pair.
+fn absorb_vertex(entity: &mut Entity, pairs: &[(String, String)], index: &mut usize) {
+    *index += 1;
+    let mut x = None;
+    let mut y = None;
+    let mut bulge = 0.0;
+    while *index < pairs.len() && pairs[*index].0 != "0" {
+        if let Ok(group) = pairs[*index].0.parse::<i32>() {
+            match group {
+                10 => x = pairs[*index].1.parse().ok(),
+                20 => y = pairs[*index].1.parse().ok(),
+                42 => bulge = pairs[*index].1.parse().unwrap_or(0.0),
+                _ => {}
+            }
+        }
+        *index += 1;
+    }
+    if let (Some(x), Some(y)) = (x, y) {
+        entity.vertices.push(PolylineVertex { x, y, bulge });
+    }
+}
+
+/// `index` points at a `0` pair. Leaves it on the next `0` pair.
+fn skip_until_next_entity(pairs: &[(String, String)], index: &mut usize) {
+    *index += 1;
+    while *index < pairs.len() && pairs[*index].0 != "0" {
+        *index += 1;
+    }
 }
 
 fn is_geometry(ty: &str) -> bool {
@@ -336,8 +401,8 @@ fn pen_for_rgb(doc: &mut Document, rgb: [u8; 3]) -> usize {
     if let Some(index) = doc.pens.iter().position(|pen| pen.color == rgb) {
         return index;
     }
-    if let Some(index) = (8..doc.pens.len())
-        .find(|index| doc.pens[*index].color == palette_color(*index))
+    if let Some(index) =
+        (8..doc.pens.len()).find(|index| doc.pens[*index].color == palette_color(*index))
     {
         doc.pens[index].color = rgb;
         return index;
@@ -447,6 +512,7 @@ fn contours_of(entity: &Entity) -> Option<Vec<Contour>> {
         "LINE" => line(entity),
         "POINT" => Vec::new(),
         "LWPOLYLINE" => lwpolyline(entity),
+        "POLYLINE" => polyline(entity),
         "CIRCLE" => circle(entity),
         "ARC" => arc(entity),
         "ELLIPSE" => ellipse(entity),
@@ -503,6 +569,29 @@ fn lwpolyline(entity: &Entity) -> Vec<Contour> {
     vec![Contour { closed, pts }]
 }
 
+fn polyline(entity: &Entity) -> Vec<Contour> {
+    let flags = field_int(entity, 70).unwrap_or(0);
+    // Bit 4 is a polygon mesh and bit 6 is a polyface mesh. Their VERTEX
+    // records are a grid, not a mark path.
+    if flags & 16 != 0 || flags & 64 != 0 || entity.vertices.len() < 2 {
+        return Vec::new();
+    }
+    let closed = flags & 1 == 1;
+    let count = entity.vertices.len();
+    let mut pts = Vec::new();
+    let segments = if closed { count } else { count - 1 };
+    for index in 0..segments {
+        let next = (index + 1) % count;
+        let start = [entity.vertices[index].x, entity.vertices[index].y];
+        let end = [entity.vertices[next].x, entity.vertices[next].y];
+        if index == 0 {
+            pts.push(start);
+        }
+        append_bulge(&mut pts, start, end, entity.vertices[index].bulge);
+    }
+    vec![Contour { closed, pts }]
+}
+
 fn append_bulge(pts: &mut Vec<[f64; 2]>, start: [f64; 2], end: [f64; 2], bulge: f64) {
     if bulge.abs() < 1e-8 {
         pts.push(end);
@@ -524,7 +613,9 @@ fn append_bulge(pts: &mut Vec<[f64; 2]>, start: [f64; 2], end: [f64; 2], bulge: 
     let center_x = mid_x + sign * (-dy / chord) * offset;
     let center_y = mid_y + sign * (dx / chord) * offset;
     let start_angle = (start[1] - center_y).atan2(start[0] - center_x);
-    let steps = (theta.abs() / std::f64::consts::FRAC_PI_8).ceil().clamp(4.0, 64.0) as usize;
+    let steps = (theta.abs() / std::f64::consts::FRAC_PI_8)
+        .ceil()
+        .clamp(4.0, 64.0) as usize;
     for step in 1..=steps {
         let angle = start_angle + theta * (step as f64 / steps as f64);
         pts.push([
@@ -544,9 +635,17 @@ fn circle(entity: &Entity) -> Vec<Contour> {
     let Some(radius) = field_f64(entity, 40) else {
         return Vec::new();
     };
-    Some(arc_points(cx, cy, radius, radius, 0.0, std::f64::consts::TAU, true))
-        .into_iter()
-        .collect()
+    Some(arc_points(
+        cx,
+        cy,
+        radius,
+        radius,
+        0.0,
+        std::f64::consts::TAU,
+        true,
+    ))
+    .into_iter()
+    .collect()
 }
 
 fn arc(entity: &Entity) -> Vec<Contour> {
@@ -669,8 +768,8 @@ fn spline(entity: &Entity) -> Vec<Contour> {
         &weights,
     ));
     dedup(&mut pts);
-    let closed = flags & 1 == 1
-        || pts.len() >= 2 && dist(pts[0], *pts.last().unwrap_or(&pts[0])) < 0.05;
+    let closed =
+        flags & 1 == 1 || pts.len() >= 2 && dist(pts[0], *pts.last().unwrap_or(&pts[0])) < 0.05;
     vec![Contour { closed, pts }]
 }
 
@@ -729,55 +828,138 @@ fn dist(a: [f64; 2], b: [f64; 2]) -> f64 {
 }
 
 fn encode_dxf(doc: &Document) -> Vec<u8> {
-    let layers = export_layers(doc);
+    let split = camadas_with_several_pens(doc);
+    let layers = export_layers(doc, &split);
+    let (ext_min, ext_max) = drawing_extents(doc);
     let mut out = String::new();
-    pair(&mut out, 0, "SECTION");
-    pair(&mut out, 2, "HEADER");
-    pair(&mut out, 9, "$ACADVER");
-    pair(&mut out, 1, "AC1021");
-    pair(&mut out, 9, "$INSUNITS");
-    pair(&mut out, 70, "4");
-    pair(&mut out, 9, "$DWGCODEPAGE");
-    pair(&mut out, 3, "UTF-8");
-    pair(&mut out, 0, "ENDSEC");
+    // AutoCAD Release 12. Claiming AC1021 without handles, subclass markers,
+    // CLASSES, and OBJECTS is the file eDrawings rejects. Group 420 is not a
+    // Release 12 code; TrueView discards the drawing on an unknown group.
+    write_header(&mut out, ext_min, ext_max);
     pair(&mut out, 0, "SECTION");
     pair(&mut out, 2, "TABLES");
     write_ltype_table(&mut out);
     write_layer_table(&mut out, doc, &layers);
+    write_style_table(&mut out);
+    pair(&mut out, 0, "ENDSEC");
+    pair(&mut out, 0, "SECTION");
+    pair(&mut out, 2, "BLOCKS");
     pair(&mut out, 0, "ENDSEC");
     pair(&mut out, 0, "SECTION");
     pair(&mut out, 2, "ENTITIES");
     for path in &doc.paths {
-        let layer_name = export_layer_name(path, doc);
-        let layer_pen = layers
-            .iter()
-            .find(|layer| layer.name == layer_name)
-            .map(|layer| layer.pen)
-            .unwrap_or(path.pen);
-        let layer_rgb = pen_rgb(doc, layer_pen);
+        let layer_name = export_layer_name(path, doc, &split);
+        let aci = nearest_aci(pen_rgb(doc, path.pen)).to_string();
         for contour in &path.contours {
             let vertices = polyline_vertices(contour);
             if vertices.len() < 2 {
                 continue;
             }
-            pair(&mut out, 0, "LWPOLYLINE");
+            pair(&mut out, 0, "POLYLINE");
             pair(&mut out, 8, &layer_name);
-            let rgb = pen_rgb(doc, path.pen);
-            if rgb != layer_rgb {
-                pair(&mut out, 62, &nearest_aci(rgb).to_string());
-                pair(&mut out, 420, &true_color_code(rgb).to_string());
-            }
-            pair(&mut out, 90, &vertices.len().to_string());
+            pair(&mut out, 6, "CONTINUOUS");
+            pair(&mut out, 62, &aci);
+            pair(&mut out, 66, "1");
             pair(&mut out, 70, if contour.closed { "1" } else { "0" });
+            // Groups 10/20/30 on POLYLINE are the elevation, always 0 here.
+            // The mark points live on the VERTEX records.
+            pair(&mut out, 10, "0.0");
+            pair(&mut out, 20, "0.0");
+            pair(&mut out, 30, "0.0");
             for point in vertices {
+                pair(&mut out, 0, "VERTEX");
+                pair(&mut out, 8, &layer_name);
+                pair(&mut out, 6, "CONTINUOUS");
                 pair(&mut out, 10, &format_mm(point[0]));
                 pair(&mut out, 20, &format_mm(point[1]));
+                pair(&mut out, 30, "0.0");
             }
+            pair(&mut out, 0, "SEQEND");
+            pair(&mut out, 8, &layer_name);
         }
     }
     pair(&mut out, 0, "ENDSEC");
     pair(&mut out, 0, "EOF");
-    out.into_bytes()
+    // The header names the code page ANSI_1252. ASCII is unchanged. A character
+    // outside Latin-1 cannot be stored in that code page, so it becomes '_'.
+    latin1_bytes(&out)
+}
+
+fn latin1_bytes(text: &str) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(text.len());
+    for ch in text.chars() {
+        match u8::try_from(u32::from(ch)) {
+            Ok(byte) => bytes.push(byte),
+            Err(_) => bytes.push(b'_'),
+        }
+    }
+    bytes
+}
+
+fn drawing_extents(doc: &Document) -> ([f64; 2], [f64; 2]) {
+    let mut min = [f64::MAX, f64::MAX];
+    let mut max = [f64::MIN, f64::MIN];
+    let mut any = false;
+    for path in &doc.paths {
+        for contour in &path.contours {
+            for point in polyline_vertices(contour) {
+                any = true;
+                min[0] = min[0].min(point[0]);
+                min[1] = min[1].min(point[1]);
+                max[0] = max[0].max(point[0]);
+                max[1] = max[1].max(point[1]);
+            }
+        }
+    }
+    if any {
+        (min, max)
+    } else {
+        ([0.0, 0.0], [0.0, 0.0])
+    }
+}
+
+fn write_header(out: &mut String, min: [f64; 2], max: [f64; 2]) {
+    pair(out, 0, "SECTION");
+    pair(out, 2, "HEADER");
+    pair(out, 9, "$ACADVER");
+    pair(out, 1, "AC1009");
+    pair(out, 9, "$DWGCODEPAGE");
+    pair(out, 3, "ANSI_1252");
+    pair(out, 9, "$INSBASE");
+    pair(out, 10, "0.0");
+    pair(out, 20, "0.0");
+    pair(out, 30, "0.0");
+    pair(out, 9, "$EXTMIN");
+    pair(out, 10, &format_mm(min[0]));
+    pair(out, 20, &format_mm(min[1]));
+    pair(out, 30, "0.0");
+    pair(out, 9, "$EXTMAX");
+    pair(out, 10, &format_mm(max[0]));
+    pair(out, 20, &format_mm(max[1]));
+    pair(out, 30, "0.0");
+    pair(out, 9, "$LIMMIN");
+    pair(out, 10, &format_mm(min[0]));
+    pair(out, 20, &format_mm(min[1]));
+    pair(out, 9, "$LIMMAX");
+    pair(out, 10, &format_mm(max[0]));
+    pair(out, 20, &format_mm(max[1]));
+    pair(out, 9, "$CLAYER");
+    pair(out, 8, "0");
+    pair(out, 9, "$CELTYPE");
+    pair(out, 6, "BYLAYER");
+    pair(out, 9, "$CECOLOR");
+    pair(out, 62, "256");
+    pair(out, 9, "$TEXTSTYLE");
+    pair(out, 7, "STANDARD");
+    pair(out, 9, "$LTSCALE");
+    pair(out, 40, "1.0");
+    // AutoCAD 2000 added these. Release 12 readers skip a header variable
+    // they do not know. EzCad looks up both names: 4 is millimeters, 1 is metric.
+    pair(out, 9, "$INSUNITS");
+    pair(out, 70, "4");
+    pair(out, 9, "$MEASUREMENT");
+    pair(out, 70, "1");
+    pair(out, 0, "ENDSEC");
 }
 
 struct ExportLayer {
@@ -785,59 +967,75 @@ struct ExportLayer {
     pen: usize,
 }
 
-fn export_layers(doc: &Document) -> Vec<ExportLayer> {
+fn export_layers(doc: &Document, split: &HashSet<String>) -> Vec<ExportLayer> {
     let mut order = vec!["0".to_owned()];
-    let mut counts: HashMap<String, HashMap<usize, usize>> = HashMap::new();
+    let mut pens: HashMap<String, usize> = HashMap::new();
     for path in &doc.paths {
-        let name = export_layer_name(path, doc);
+        if !has_exportable_contour(path) {
+            continue;
+        }
+        let name = export_layer_name(path, doc, split);
         if !order.iter().any(|existing| existing == &name) {
             order.push(name.clone());
         }
-        let contours = path
-            .contours
-            .iter()
-            .filter(|contour| contour.pts.len() >= 2)
-            .count();
-        if contours == 0 {
-            continue;
-        }
-        *counts
-            .entry(name)
-            .or_default()
-            .entry(path.pen)
-            .or_default() += contours;
+        pens.entry(name).or_insert(path.pen);
     }
     order
         .into_iter()
         .map(|name| ExportLayer {
-            pen: counts
-                .get(&name)
-                .map(majority_pen)
-                .unwrap_or(0),
+            pen: pens.get(&name).copied().unwrap_or(0),
             name,
         })
         .collect()
 }
 
-fn majority_pen(counts: &HashMap<usize, usize>) -> usize {
-    counts
-        .iter()
-        .max_by_key(|(pen, count)| (*count, std::cmp::Reverse(*pen)))
-        .map(|(pen, _)| *pen)
-        .unwrap_or(0)
+/// Camadas whose exported contours use more than one pen. Those are split so
+/// EzCad, which keeps one color per layer, does not paint them all blue.
+fn camadas_with_several_pens(doc: &Document) -> HashSet<String> {
+    let mut first_pen: HashMap<&str, usize> = HashMap::new();
+    let mut split = HashSet::new();
+    for path in &doc.paths {
+        let name = path.layer.trim();
+        if name.is_empty() || !has_exportable_contour(path) {
+            continue;
+        }
+        match first_pen.get(name).copied() {
+            Some(pen) if pen != path.pen => {
+                split.insert(name.to_owned());
+            }
+            Some(_) => {}
+            None => {
+                first_pen.insert(name, path.pen);
+            }
+        }
+    }
+    split
 }
 
-fn export_layer_name(path: &PathObj, doc: &Document) -> String {
-    let raw = if path.layer.trim().is_empty() {
-        doc.pens
-            .get(path.pen)
-            .map(|pen| pen.name.clone())
-            .filter(|name| !name.trim().is_empty())
-            .unwrap_or_else(|| format!("Pen {}", path.pen))
+fn has_exportable_contour(path: &PathObj) -> bool {
+    path.contours.iter().any(|contour| contour.pts.len() >= 2)
+}
+
+fn export_layer_name(path: &PathObj, doc: &Document, split: &HashSet<String>) -> String {
+    let camada = path.layer.trim();
+    let raw = if camada.is_empty() {
+        pen_label(doc, path.pen)
+    } else if split.contains(camada) {
+        format!("{camada} {}", pen_label(doc, path.pen))
     } else {
-        path.layer.clone()
+        camada.to_owned()
     };
     sanitize_layer(&raw)
+}
+
+fn pen_label(doc: &Document, index: usize) -> String {
+    if let Some(pen) = doc.pens.get(index) {
+        let name = pen.name.trim();
+        if !name.is_empty() {
+            return name.to_owned();
+        }
+    }
+    format!("Pen {index}")
 }
 
 fn sanitize_layer(name: &str) -> String {
@@ -906,16 +1104,9 @@ fn channel_dist(left: [u8; 3], right: [u8; 3]) -> i32 {
     total
 }
 
-fn true_color_code(rgb: [u8; 3]) -> u32 {
-    (u32::from(rgb[0]) << 16) | (u32::from(rgb[1]) << 8) | u32::from(rgb[2])
-}
-
 fn polyline_vertices(contour: &Contour) -> Vec<[f64; 2]> {
     let mut pts = contour.pts.clone();
-    if contour.closed
-        && pts.len() >= 2
-        && dist(pts[0], *pts.last().unwrap_or(&pts[0])) < 1e-6
-    {
+    if contour.closed && pts.len() >= 2 && dist(pts[0], *pts.last().unwrap_or(&pts[0])) < 1e-6 {
         pts.pop();
     }
     pts
@@ -924,15 +1115,23 @@ fn polyline_vertices(contour: &Contour) -> Vec<[f64; 2]> {
 fn write_ltype_table(out: &mut String) {
     pair(out, 0, "TABLE");
     pair(out, 2, "LTYPE");
-    pair(out, 70, "1");
+    pair(out, 70, "3");
+    // An entity that omits group 6 is ByLayer. The table has to define that
+    // name, plus ByBlock, or the loader fails while resolving the linetype.
+    write_ltype(out, "BYBLOCK", "BYBLOCK");
+    write_ltype(out, "BYLAYER", "BYLAYER");
+    write_ltype(out, "CONTINUOUS", "Solid line");
+    pair(out, 0, "ENDTAB");
+}
+
+fn write_ltype(out: &mut String, name: &str, description: &str) {
     pair(out, 0, "LTYPE");
-    pair(out, 2, "CONTINUOUS");
+    pair(out, 2, name);
     pair(out, 70, "0");
-    pair(out, 3, "Solid line");
+    pair(out, 3, description);
     pair(out, 72, "65");
     pair(out, 73, "0");
     pair(out, 40, "0.0");
-    pair(out, 0, "ENDTAB");
 }
 
 fn write_layer_table(out: &mut String, doc: &Document, layers: &[ExportLayer]) {
@@ -945,9 +1144,26 @@ fn write_layer_table(out: &mut String, doc: &Document, layers: &[ExportLayer]) {
         pair(out, 2, &layer.name);
         pair(out, 70, "0");
         pair(out, 62, &nearest_aci(rgb).to_string());
-        pair(out, 420, &true_color_code(rgb).to_string());
         pair(out, 6, "CONTINUOUS");
     }
+    pair(out, 0, "ENDTAB");
+}
+
+fn write_style_table(out: &mut String) {
+    pair(out, 0, "TABLE");
+    pair(out, 2, "STYLE");
+    pair(out, 70, "1");
+    pair(out, 0, "STYLE");
+    pair(out, 2, "STANDARD");
+    pair(out, 70, "0");
+    pair(out, 40, "0.0");
+    pair(out, 41, "1.0");
+    pair(out, 50, "0.0");
+    pair(out, 71, "0");
+    pair(out, 42, "2.5");
+    pair(out, 3, "txt");
+    // Group 4 is the bigfont file. AutoCAD writes an empty value here.
+    pair(out, 4, "");
     pair(out, 0, "ENDTAB");
 }
 
@@ -982,8 +1198,10 @@ mod tests {
         let path = std::env::temp_dir().join("ezd-studio-square.dxf");
         write_dxf(&path, &doc).expect("write");
         let text = std::fs::read_to_string(&path).expect("read text");
+        assert_release_12(&text);
         assert!(text.contains("Camada 1"));
-        assert!(text.contains(&true_color_code(doc.pens[2].color).to_string()));
+        assert!(text.contains(" 62\r\n1\r\n"));
+        assert_polylines_are_complete(&text);
         let loaded = read_dxf(&path).expect("read");
         let bounds = loaded.bounds().expect("bounds");
         assert!((bounds.min_x - -10.0).abs() < 1e-4);
@@ -1003,9 +1221,15 @@ mod tests {
         doc.paths.push(square_path("B", "Camada 1", 2, 10.0));
         let path = std::env::temp_dir().join("ezd-studio-two-colors.dxf");
         write_dxf(&path, &doc).expect("write");
+        let text = std::fs::read_to_string(&path).expect("text");
+        assert!(text.contains("Camada 1 Pen 1"));
+        assert!(text.contains("Camada 1 Pen 2"));
+        assert!(text.contains(" 62\r\n5\r\n"));
+        assert!(text.contains(" 62\r\n1\r\n"));
         let loaded = read_dxf(&path).expect("read");
         assert_eq!(loaded.paths.len(), 2);
-        assert!(loaded.paths.iter().all(|path| path.layer == "Camada 1"));
+        assert_eq!(loaded.paths[0].layer, "Camada 1 Pen 1");
+        assert_eq!(loaded.paths[1].layer, "Camada 1 Pen 2");
         assert_eq!(loaded.pens[loaded.paths[0].pen].color, doc.pens[1].color);
         assert_eq!(loaded.pens[loaded.paths[1].pen].color, doc.pens[2].color);
         let _ = std::fs::remove_file(path);
@@ -1021,11 +1245,89 @@ mod tests {
         write_dxf(&path, &doc).expect("write");
         let text = std::fs::read_to_string(&path).expect("text");
         assert!(text.contains("Corte"));
-        assert!(text.contains(&true_color_code([255, 128, 0]).to_string()));
+        // Release 12 stores the nearest ACI, not the exact RGB. Orange is yellow.
+        assert!(text.contains(" 62\r\n2\r\n"));
         let loaded = read_dxf(&path).expect("read");
         assert_eq!(loaded.paths[0].layer, "Corte");
-        assert_eq!(loaded.pens[loaded.paths[0].pen].color, [255, 128, 0]);
+        assert_eq!(loaded.paths[0].pen, 5);
+        assert_eq!(loaded.pens[loaded.paths[0].pen].color, palette_color(5));
         let _ = std::fs::remove_file(path);
+    }
+
+    fn assert_release_12(text: &str) {
+        assert!(text.starts_with("  0\r\nSECTION\r\n  2\r\nHEADER\r\n"));
+        assert!(text.contains("$ACADVER\r\n  1\r\nAC1009\r\n"));
+        assert!(text.contains("$DWGCODEPAGE\r\n  3\r\nANSI_1252\r\n"));
+        assert!(text.contains("$INSUNITS\r\n 70\r\n4\r\n"));
+        assert!(text.contains("$MEASUREMENT\r\n 70\r\n1\r\n"));
+        assert!(text.contains("  2\r\nTABLES\r\n"));
+        assert!(text.contains("  2\r\nBLOCKS\r\n"));
+        assert!(text.contains("  2\r\nENTITIES\r\n"));
+        assert!(text.contains("BYBLOCK"));
+        assert!(text.contains("BYLAYER"));
+        assert!(text.contains("CONTINUOUS"));
+        assert!(text.contains("STANDARD"));
+        assert!(text.ends_with("  0\r\nEOF\r\n"));
+        assert!(!text.contains("LWPOLYLINE"));
+        assert!(!text.contains("AC1021"));
+        assert!(!text.contains("UTF-8"));
+        assert!(!text.contains("\r\n100\r\n"));
+        assert!(!text.contains("\r\n330\r\n"));
+        assert!(!text.contains("\r\n420\r\n"));
+        assert!(!text.contains("\r\n 90\r\n"));
+        assert_eq!(text.matches('\n').count(), text.matches("\r\n").count());
+    }
+
+    fn assert_polylines_are_complete(text: &str) {
+        let pairs = parse_pairs(text);
+        let mut index = 0;
+        let mut in_entities = false;
+        let mut polylines = 0;
+        while index < pairs.len() {
+            if pairs[index].0 == "0" && pairs[index].1 == "SECTION" {
+                in_entities = pairs
+                    .get(index + 1)
+                    .is_some_and(|pair| pair.0 == "2" && pair.1 == "ENTITIES");
+            }
+            if pairs[index].0 == "0" && pairs[index].1 == "ENDSEC" {
+                in_entities = false;
+            }
+            if in_entities && pairs[index].0 == "0" && pairs[index].1 == "POLYLINE" {
+                polylines += 1;
+                let mut saw_vertices_follow = false;
+                let mut saw_color = false;
+                index += 1;
+                while index < pairs.len() && pairs[index].0 != "0" {
+                    if pairs[index].0 == "66" && pairs[index].1 == "1" {
+                        saw_vertices_follow = true;
+                    }
+                    if pairs[index].0 == "62" {
+                        saw_color = true;
+                    }
+                    index += 1;
+                }
+                assert!(saw_vertices_follow, "POLYLINE missing group 66");
+                assert!(saw_color, "POLYLINE missing group 62");
+                let mut vertices = 0;
+                while index < pairs.len() && pairs[index].1 == "VERTEX" {
+                    vertices += 1;
+                    index += 1;
+                    let mut saw_x = false;
+                    let mut saw_y = false;
+                    while index < pairs.len() && pairs[index].0 != "0" {
+                        saw_x |= pairs[index].0 == "10";
+                        saw_y |= pairs[index].0 == "20";
+                        index += 1;
+                    }
+                    assert!(saw_x && saw_y, "VERTEX missing 10/20");
+                }
+                assert!(vertices >= 2, "POLYLINE has {vertices} vertices");
+                assert_eq!(pairs[index].1, "SEQEND");
+                continue;
+            }
+            index += 1;
+        }
+        assert!(polylines >= 1);
     }
 
     #[test]

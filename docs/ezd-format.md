@@ -122,9 +122,11 @@ then the bit stream
 
 The code uses the low `bit_length` bits. Bits are read MSB first inside each byte. Decode stops after `uncompressed` bytes.
 
-The sample table has 256 symbols and a real compression. The writer emits an identity table: symbol N, code N, length 8, then the raw object bytes. That table is prefix-free. `huffman_decode` inverts it. The decoder keys a `HashMap` by `(bit_length, code)` so a dense table stays cheap. A code length of 0 or above 32 is an error. Running past `max_len` without a match is an error.
+The sample table has 256 symbols and a real compression. The writer emits an identity table: symbol N, code N, length 8, then the raw object bytes, then one extra `0` byte. That table is prefix-free. `huffman_decode` inverts it. The decoder keys a `HashMap` by `(bit_length, code)` so a dense table stays cheap. A code length of 0 or above 32 is an error. Running past `max_len` without a match is an error.
 
-`payload length` in the vector header is `compressed.len() - (2 + 256 * 7)`. For the identity table that equals the raw object length.
+EzCad emits a finished symbol when it looks at the next input byte, and it stops when the input runs out. Without the extra byte the decompressed length is one short. That mismatch is return code 5, the dialog "File's format is error,maybe damaged!". The content checksum is not reached.
+
+`payload length` in the vector header is `compressed.len() - (2 + 256 * 7)`. For the identity table that is the raw object length plus the extra byte.
 
 ## Object stream
 

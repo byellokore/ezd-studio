@@ -1,8 +1,6 @@
 //! macOS window for opening DXF and EzCad drawings and saving `.ezd` or `.dxf`.
 
-use eframe::egui::{
-    self, Color32, Pos2, Rect, Sense, Shape, Stroke, Vec2,
-};
+use eframe::egui::{self, Color32, Pos2, Rect, Sense, Shape, Stroke, Vec2};
 use ezd_studio::{open_drawing, write_dxf, write_ezd, Document, Pen};
 use std::path::PathBuf;
 
@@ -417,7 +415,11 @@ fn pen_editor(ui: &mut egui::Ui, pen: &mut Pen) {
     labeled_drag(ui, "Frequency", &mut pen.frequency_khz, 1.0, 200.0, " kHz");
     ui.horizontal(|ui| {
         ui.label("Passes");
-        ui.add(egui::DragValue::new(&mut pen.passes).range(1..=100).speed(0.05));
+        ui.add(
+            egui::DragValue::new(&mut pen.passes)
+                .range(1..=100)
+                .speed(0.05),
+        );
     });
 }
 

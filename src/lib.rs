@@ -50,7 +50,8 @@ mod tests {
 
     #[test]
     fn imports_the_bonequinha_dxf_as_a_markable_outline() {
-        let path = Path::new("/Users/byellokore/Downloads/DXFFFFBONEQUINHA ( Cliente Rafa Dutra.dxf");
+        let path =
+            Path::new("/Users/byellokore/Downloads/DXFFFFBONEQUINHA ( Cliente Rafa Dutra.dxf");
         let doc = read_dxf(path).expect("dxf");
         assert!(doc.paths.len() > 80, "paths {}", doc.paths.len());
         let bounds = doc.bounds().expect("bounds");
@@ -104,8 +105,6 @@ pub fn open_drawing(path: &std::path::Path) -> Result<Document> {
     match ext.as_str() {
         "ezd" => read_ezd(path),
         "dxf" => read_dxf(path),
-        _ => Err(Error::Format(
-            "choose an .ezd or .dxf file".to_owned(),
-        )),
+        _ => Err(Error::Format("choose an .ezd or .dxf file".to_owned())),
     }
 }

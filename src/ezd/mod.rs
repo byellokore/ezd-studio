@@ -88,17 +88,11 @@ fn utf16_lossy(bytes: &[u8]) -> String {
 }
 
 fn i32_field(bytes: &[u8]) -> Option<i32> {
-    bytes
-        .try_into()
-        .ok()
-        .map(i32::from_le_bytes)
+    bytes.try_into().ok().map(i32::from_le_bytes)
 }
 
 fn f64_field(bytes: &[u8]) -> Option<f64> {
-    bytes
-        .try_into()
-        .ok()
-        .map(f64::from_le_bytes)
+    bytes.try_into().ok().map(f64::from_le_bytes)
 }
 
 fn point_field(bytes: &[u8]) -> Option<[f64; 2]> {
@@ -127,7 +121,11 @@ fn huffman_decode(cursor: &mut Cursor<'_>, uncompressed: usize) -> crate::Result
         }
         let len = len as u8;
         max_len = max_len.max(len);
-        let mask = if len == 32 { u32::MAX } else { (1_u32 << len) - 1 };
+        let mask = if len == 32 {
+            u32::MAX
+        } else {
+            (1_u32 << len) - 1
+        };
         codes.insert((len, bits & mask), symbol);
     }
     let packed = cursor.take(cursor.remaining())?;
@@ -174,6 +172,11 @@ fn le4_u16(bytes: &[u8]) -> [u8; 2] {
 fn huffman_encode(data: &[u8]) -> Vec<u8> {
     // Identity codes: every byte is stored as itself, MSB first. EzCad reads
     // the table, so the stream does not have to be smaller than the input.
+    //
+    // EzCad emits a finished symbol when it inspects the next input byte, and
+    // it stops when the input is exhausted. The last symbol is therefore
+    // dropped unless one extra byte follows the payload. That missing byte is
+    // what made OpenEzdFile return 5 ("File's format is error,maybe damaged!").
     let mut out = Vec::with_capacity(2 + 256 * 7 + data.len() + 1);
     out.extend_from_slice(&256_u16.to_le_bytes());
     for symbol in 0..256_u16 {
@@ -182,5 +185,6 @@ fn huffman_encode(data: &[u8]) -> Vec<u8> {
         out.extend_from_slice(&8_u16.to_le_bytes());
     }
     out.extend_from_slice(data);
+    out.push(0);
     out
 }

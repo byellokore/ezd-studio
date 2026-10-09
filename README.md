@@ -9,13 +9,13 @@ cd ezd-studio
 cargo run --release
 ```
 
-Open accepts `.dxf` and `.ezd`. Save .ezd writes an EzCad job. Save .dxf writes polylines in millimeters, on the original camada when the drawing has one, colored with the pen you selected. A path opened from `.ezd` has no camada, so its DXF layer is the pen name. Command-O opens. Command-S saves `.ezd`.
+Open accepts `.dxf` and `.ezd`. Save .ezd writes an EzCad job. Save .dxf writes an AutoCAD Release 12 ASCII file (`AC1009`): polylines in millimeters, with a HEADER, TABLES, BLOCKS, and ENTITIES section. A camada that uses one pen keeps its name. A camada that uses several pens is split, one layer per pen, and every polyline carries an AutoCAD color index so EzCad does not collapse them. A path opened from `.ezd` has no camada, so its DXF layer is the pen name. Command-O opens. Command-S saves `.ezd`.
 
 DXF import keeps lines, polylines, arcs, circles, ellipses, and splines, and it expands inserted blocks. Solid hatches are not copied: in these files the hatch repeats the same outlines, and tracing both would mark the drawing twice. The result is centered on the field.
 
 Pen speed is mm/s, power is percent, and frequency is kHz. Those values are stored in EzCad's 256-pen table. The field size in the window is a view guide. Saving does not write that size into the file.
 
-This Mac cannot run EzCad, so open a newly saved `.ezd` in EzCad 2 on Windows to confirm the machine accepts it. The vector section uses an identity Huffman table. Its two checksum words are CRC-16/X-25 of the raw object bytes and of the first 16 header bytes. A file EzCad saved matches that algorithm. Windows has not yet reopened a file written after the checksums were filled in.
+This Mac cannot run EzCad or eDrawings, so open a newly saved `.ezd` and `.dxf` there before treating them as accepted. The `.dxf` is Release 12, not an AutoCAD 2007 file. The vector section of `.ezd` uses an identity Huffman table plus one padding byte. EzCad's decoder drops the last symbol without that byte and reports a damaged file. The two checksum words are CRC-16/X-25 of the raw object bytes and of the first 16 header bytes. Windows has not yet reopened a file written after the padding byte was added.
 
 The crate license in `Cargo.toml` is MIT. Rust 1.80 or newer is required. This tree was built with rustc 1.99.
 

@@ -201,7 +201,11 @@ fn trim_name(name: &str) -> &str {
 fn encode_pens(doc: &Document) -> Vec<u8> {
     let mut out = Vec::with_capacity(256 * PEN_TEMPLATE.len());
     for index in 0..256 {
-        let pen = doc.pens.get(index).cloned().unwrap_or_else(|| Pen::new(index, [0, 0, 0]));
+        let pen = doc
+            .pens
+            .get(index)
+            .cloned()
+            .unwrap_or_else(|| Pen::new(index, [0, 0, 0]));
         out.extend_from_slice(&pen_record(&pen));
     }
     out
@@ -268,7 +272,8 @@ fn encode_preview(doc: &Document) -> Vec<u8> {
                 let mut prev: Option<(i32, i32)> = None;
                 for pt in &contour.pts {
                     let x = ((pt[0] - bounds.min_x) * scale + 8.0).round() as i32;
-                    let y = (f64::from(PREVIEW) - 8.0 - (pt[1] - bounds.min_y) * scale).round() as i32;
+                    let y =
+                        (f64::from(PREVIEW) - 8.0 - (pt[1] - bounds.min_y) * scale).round() as i32;
                     if let Some(last) = prev {
                         draw_line(&mut pixels, last, (x, y));
                     }
@@ -382,10 +387,17 @@ mod tests {
         let content_crc = le_u32(header, 4);
         let header_crc = le_u32(header, 16);
         assert_eq!(le_u32(header, 0), vectors.len() as u32);
+        assert_eq!(le_u32(header, 8), vectors.len() as u32 + 1);
         assert_eq!(content_crc, u32::from(crc16_x25(&vectors)));
         assert_eq!(header_crc, u32::from(crc16_x25(&header[..16])));
         assert_ne!(content_crc, 0);
         assert_ne!(header_crc, 0);
+        let stream_at = vectors_at + 20 + 2 + 256 * 7;
+        let payload = (vectors.len() + 1) as usize;
+        let stream = &bytes[stream_at..stream_at + payload];
+        assert_eq!(&stream[..vectors.len()], vectors.as_slice());
+        assert_eq!(stream[vectors.len()], 0);
+        assert_eq!(ezcad_identity_decode(stream, vectors.len()), vectors);
         assert!(x25_residue_matches(&vectors, content_crc as u16));
         assert!(x25_residue_matches(&header[..16], header_crc as u16));
     }
@@ -430,6 +442,24 @@ mod tests {
 
     fn le_u32(bytes: &[u8], at: usize) -> u32 {
         u32::from_le_bytes(bytes[at..at + 4].try_into().expect("4 bytes"))
+    }
+
+    /// EzCad `DeCompressToBuf` on an identity table: a symbol is emitted when
+    /// the next input byte is examined, so the stream must be one byte longer
+    /// than the output.
+    fn ezcad_identity_decode(packed: &[u8], expected: usize) -> Vec<u8> {
+        let mut out = Vec::with_capacity(expected);
+        let mut pending: Option<u8> = None;
+        for &byte in packed {
+            if let Some(symbol) = pending.take() {
+                out.push(symbol);
+                if out.len() == expected {
+                    break;
+                }
+            }
+            pending = Some(byte);
+        }
+        out
     }
 
     /// EzCad's check: fold the stored CRC in after the data, with no final XOR,

@@ -171,7 +171,7 @@ Header fields, in order:
 | ellipse | 5 | bounds at fields 1 and 2, 48 steps | not written |
 | polygon | 6 | regular polygon, side count at field 7, 3 to 64 sides | not written |
 | group | `0x10` | children only | not written |
-| hatch | `0x20` | children, then the hatch tail below | not written |
+| hatch | `0x20` | children, then the hatch tail below | a filled path: boundary group, 54-field properties, cached lines 0.1 mm apart |
 | combine | `0x30` | children only | not written |
 | image | `0x40` | skipped. See below | not written |
 | vector file | `0x50` | children, then one property struct | not written |

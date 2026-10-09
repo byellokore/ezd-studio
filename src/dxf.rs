@@ -20,7 +20,7 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
-use crate::geom::{palette_color, Contour, Document, PathObj};
+use crate::geom::{fill_targets, palette_color, Contour, Document, PathObj};
 use crate::{Error, Result};
 
 /// A stored polyline stays within this distance of the true DXF curve.
@@ -330,6 +330,7 @@ fn skip_until_next_entity(pairs: &[(String, String)], index: &mut usize) {
 }
 
 fn is_geometry(ty: &str) -> bool {
+    // SOLID is a filled face written for eDrawings. It is not a mark path.
     matches!(
         ty,
         "LINE" | "LWPOLYLINE" | "POLYLINE" | "CIRCLE" | "ARC" | "ELLIPSE" | "SPLINE" | "POINT"
@@ -999,11 +1000,77 @@ fn encode_dxf(doc: &Document) -> Vec<u8> {
             pair(&mut out, 8, &layer_name);
         }
     }
+    write_fill_solids(&mut out, doc, &split);
     pair(&mut out, 0, "ENDSEC");
     pair(&mut out, 0, "EOF");
     // The header names the code page ANSI_1252. ASCII is unchanged. A character
     // outside Latin-1 cannot be stored in that code page, so it becomes '_'.
     latin1_bytes(&out)
+}
+
+/// Filled faces for eDrawings. Each triangle is one Release 12 `SOLID`.
+///
+/// EzCad imports outlines, not these faces, so the mark path stays the polyline.
+/// This reader also skips `SOLID`, and restores the fill from the header note.
+fn write_fill_solids(out: &mut String, doc: &Document, split: &HashSet<String>) {
+    let mut all = Vec::new();
+    let mut owners = Vec::new();
+    for (path_index, path) in doc.paths.iter().enumerate() {
+        for contour in &path.contours {
+            if contour.closed && contour.pts.len() >= 3 {
+                owners.push(path_index);
+                all.push(contour.pts.as_slice());
+            }
+        }
+    }
+    for (path_index, path) in doc.paths.iter().enumerate() {
+        if !path.filled {
+            continue;
+        }
+        let targets: Vec<&[[f64; 2]]> = all
+            .iter()
+            .enumerate()
+            .filter(|(slot, _)| owners[*slot] == path_index)
+            .map(|(_, pts)| *pts)
+            .collect();
+        if targets.is_empty() {
+            continue;
+        }
+        let layer_name = export_layer_name(path, doc, split);
+        let aci = nearest_aci(pen_rgb(doc, path.pen)).to_string();
+        for mesh in fill_targets(&targets, &all) {
+            for tri in &mesh.tris {
+                write_solid(
+                    out,
+                    &layer_name,
+                    &aci,
+                    [
+                        mesh.pts[tri[0] as usize],
+                        mesh.pts[tri[1] as usize],
+                        mesh.pts[tri[2] as usize],
+                    ],
+                );
+            }
+        }
+    }
+}
+
+fn write_solid(out: &mut String, layer: &str, aci: &str, corners: [[f64; 2]; 3]) {
+    pair(out, 0, "SOLID");
+    pair(out, 8, layer);
+    pair(out, 62, aci);
+    // A triangle repeats its third corner as the fourth. Entered in boundary
+    // order, that is a filled face rather than a bowtie.
+    write_solid_corner(out, 10, corners[0]);
+    write_solid_corner(out, 11, corners[1]);
+    write_solid_corner(out, 12, corners[2]);
+    write_solid_corner(out, 13, corners[2]);
+}
+
+fn write_solid_corner(out: &mut String, x_group: i32, point: [f64; 2]) {
+    pair(out, x_group, &format_mm(point[0]));
+    pair(out, x_group + 10, &format_mm(point[1]));
+    pair(out, x_group + 20, "0.0");
 }
 
 fn latin1_bytes(text: &str) -> Vec<u8> {
@@ -1479,7 +1546,9 @@ mod tests {
         assert!(text.contains("$EZDSTUDIO0\r\n  1\r\n8;255,128,0;1\r\n"));
         assert!(text.contains(" 62\r\n2\r\n"));
         assert!(!text.contains("\r\n420\r\n"));
+        assert_eq!(text.matches("\r\nSOLID\r\n").count(), 2);
         let loaded = read_dxf(&path).expect("read");
+        assert_eq!(loaded.paths.len(), 1);
         assert!(loaded.paths[0].filled);
         assert_eq!(loaded.paths[0].pen, 8);
         assert_eq!(loaded.pens[8].color, [255, 128, 0]);

@@ -5,7 +5,7 @@ use std::io::Write;
 use std::path::Path;
 
 use super::huffman_encode;
-use crate::geom::{Contour, Document, Pen};
+use crate::geom::{fill_targets, Contour, Document, PathObj, Pen};
 use crate::{Error, Result};
 
 const PEN_TEMPLATE: &[u8] = include_bytes!("pen_template.bin");
@@ -131,6 +131,9 @@ fn encode_vectors(doc: &Document) -> Vec<u8> {
             }
             write_curve(&mut out, path.pen, &path.name, contour);
         }
+        if path.filled {
+            write_hatch(&mut out, doc, path);
+        }
     }
     out.extend_from_slice(&0_i32.to_le_bytes());
     out
@@ -181,6 +184,250 @@ fn write_curve(out: &mut Vec<u8>, pen: usize, name: &str, contour: &Contour) {
         out.extend_from_slice(&pt[0].to_le_bytes());
         out.extend_from_slice(&pt[1].to_le_bytes());
     }
+}
+
+const HATCH: i32 = 0x20;
+const GROUP: i32 = 0x10;
+/// Distance between hatch lines, in millimeters. Matches the property block.
+const HATCH_SPACING_MM: f64 = 0.1;
+
+/// EzCad hatch: the outline in a group, the 54-field property block from a real
+/// job, then a cached group of the hatch lines. EzCad draws those lines.
+fn write_hatch(out: &mut Vec<u8>, doc: &Document, path: &PathObj) {
+    let lines = hatch_lines(doc, path);
+    if lines.is_empty() {
+        return;
+    }
+    let anchor = path
+        .contours
+        .iter()
+        .find_map(|contour| contour.pts.first().copied())
+        .unwrap_or([0.0, 0.0]);
+    out.extend_from_slice(&HATCH.to_le_bytes());
+    write_object_header(out, path.pen, HATCH as u16, &path.name, anchor);
+    out.extend_from_slice(&1_i32.to_le_bytes());
+    let boundary: Vec<Contour> = path
+        .contours
+        .iter()
+        .filter(|contour| contour.closed && contour.pts.len() >= 3)
+        .cloned()
+        .collect();
+    write_group(out, path.pen, "", &boundary);
+    let fields = hatch_properties();
+    debug_assert_eq!(fields.len(), 54);
+    write_struct(out, &fields);
+    write_cached_group_header(out, path.pen, anchor);
+    out.extend_from_slice(&1_i32.to_le_bytes());
+    write_group(out, path.pen, "", &lines);
+}
+
+fn write_group(out: &mut Vec<u8>, pen: usize, name: &str, contours: &[Contour]) {
+    let anchor = contours
+        .iter()
+        .find_map(|contour| contour.pts.first().copied())
+        .unwrap_or([0.0, 0.0]);
+    out.extend_from_slice(&GROUP.to_le_bytes());
+    write_object_header(out, pen, GROUP as u16, name, anchor);
+    out.extend_from_slice(&(contours.len() as i32).to_le_bytes());
+    for contour in contours {
+        if contour.pts.len() >= 2 {
+            write_curve(out, pen, name, contour);
+        }
+    }
+}
+
+fn write_cached_group_header(out: &mut Vec<u8>, pen: usize, anchor: [f64; 2]) {
+    let fields = object_fields(pen, GROUP as u16, "", anchor);
+    // The cached group has no type word. Its header list length is 15.
+    debug_assert_eq!(fields.len(), 15);
+    write_struct(out, &fields);
+}
+
+fn write_object_header(out: &mut Vec<u8>, pen: usize, kind: u16, name: &str, anchor: [f64; 2]) {
+    write_struct(out, &object_fields(pen, kind, name, anchor));
+}
+
+fn object_fields(pen: usize, kind: u16, name: &str, anchor: [f64; 2]) -> Vec<Vec<u8>> {
+    let mut point = Vec::with_capacity(16);
+    point.extend_from_slice(&anchor[0].to_le_bytes());
+    point.extend_from_slice(&anchor[1].to_le_bytes());
+    vec![
+        (pen as i32).to_le_bytes().to_vec(),
+        kind.to_le_bytes().to_vec(),
+        0_u16.to_le_bytes().to_vec(),
+        utf16_z(trim_name(name)),
+        1_i32.to_le_bytes().to_vec(),
+        0_u16.to_le_bytes().to_vec(),
+        0_u16.to_le_bytes().to_vec(),
+        0_u16.to_le_bytes().to_vec(),
+        0_u16.to_le_bytes().to_vec(),
+        1_i32.to_le_bytes().to_vec(),
+        1_i32.to_le_bytes().to_vec(),
+        10_f64.to_le_bytes().to_vec(),
+        10_f64.to_le_bytes().to_vec(),
+        point,
+        0_f64.to_le_bytes().to_vec(),
+    ]
+}
+
+fn hatch_properties() -> Vec<Vec<u8>> {
+    let spacing = HATCH_SPACING_MM;
+    let i32b = |value: i32| value.to_le_bytes().to_vec();
+    let f64b = |value: f64| value.to_le_bytes().to_vec();
+    vec![
+        i32b(0),
+        i32b(1),
+        i32b(0),
+        i32b(140),
+        f64b(0.0),
+        f64b(spacing),
+        f64b(0.0),
+        f64b(0.0),
+        f64b(0.0),
+        i32b(0),
+        i32b(0),
+        i32b(129),
+        f64b(0.0),
+        f64b(spacing),
+        f64b(0.0),
+        f64b(0.0),
+        f64b(0.0),
+        i32b(0),
+        f64b(10.0),
+        f64b(10.0),
+        i32b(0),
+        i32b(0),
+        i32b(129),
+        f64b(0.0),
+        f64b(spacing),
+        f64b(0.0),
+        f64b(0.0),
+        f64b(0.0),
+        f64b(10.0),
+        f64b(0.0),
+        f64b(0.0),
+        f64b(0.0),
+        i32b(0),
+        i32b(0),
+        i32b(0),
+        f64b(0.5),
+        f64b(0.5),
+        f64b(0.5),
+        f64b(0.0),
+        f64b(0.0),
+        f64b(0.0),
+        i32b(0),
+        i32b(1),
+        i32b(1),
+        i32b(1),
+        i32b(0),
+        i32b(0),
+        i32b(0),
+        f64b(0.0),
+        f64b(0.0),
+        f64b(0.0),
+        f64b(0.0),
+        f64b(0.0),
+        f64b(0.0),
+    ]
+}
+
+fn hatch_lines(doc: &Document, path: &PathObj) -> Vec<Contour> {
+    let mut all = Vec::new();
+    let mut target_at = Vec::new();
+    for other in &doc.paths {
+        for contour in &other.contours {
+            if contour.closed && contour.pts.len() >= 3 {
+                if std::ptr::eq(other, path) {
+                    target_at.push(all.len());
+                }
+                all.push(contour.pts.as_slice());
+            }
+        }
+    }
+    let targets: Vec<&[[f64; 2]]> = target_at.iter().map(|slot| all[*slot]).collect();
+    let mut lines = Vec::new();
+    for mesh in fill_targets(&targets, &all) {
+        lines.extend(scan_mesh(&mesh));
+    }
+    lines
+}
+
+fn scan_mesh(mesh: &crate::geom::FillMesh) -> Vec<Contour> {
+    if mesh.tris.is_empty() {
+        return Vec::new();
+    }
+    let mut min_y = f64::MAX;
+    let mut max_y = f64::MIN;
+    for point in &mesh.pts {
+        min_y = min_y.min(point[1]);
+        max_y = max_y.max(point[1]);
+    }
+    if max_y - min_y < HATCH_SPACING_MM {
+        return Vec::new();
+    }
+    let mut y = min_y + HATCH_SPACING_MM * 0.5;
+    let mut lines = Vec::new();
+    while y < max_y {
+        let mut spans = Vec::new();
+        for tri in &mesh.tris {
+            if let Some(span) = triangle_span(
+                [
+                    mesh.pts[tri[0] as usize],
+                    mesh.pts[tri[1] as usize],
+                    mesh.pts[tri[2] as usize],
+                ],
+                y,
+            ) {
+                spans.push(span);
+            }
+        }
+        spans.sort_by(|left, right| left.0.total_cmp(&right.0));
+        let mut merged: Vec<(f64, f64)> = Vec::new();
+        for (start, end) in spans {
+            if let Some(last) = merged.last_mut() {
+                if start <= last.1 + 1e-6 {
+                    last.1 = last.1.max(end);
+                    continue;
+                }
+            }
+            merged.push((start, end));
+        }
+        for (start, end) in merged {
+            if end - start < 0.01 {
+                continue;
+            }
+            lines.push(Contour {
+                closed: false,
+                pts: vec![[start, y], [end, y]],
+            });
+        }
+        y += HATCH_SPACING_MM;
+    }
+    lines
+}
+
+fn triangle_span(tri: [[f64; 2]; 3], y: f64) -> Option<(f64, f64)> {
+    let mut xs = Vec::new();
+    for index in 0..3 {
+        let start = tri[index];
+        let end = tri[(index + 1) % 3];
+        let crosses = (start[1] <= y && end[1] > y) || (end[1] <= y && start[1] > y);
+        if !crosses {
+            continue;
+        }
+        let denom = end[1] - start[1];
+        if denom.abs() < 1e-12 {
+            continue;
+        }
+        let t = (y - start[1]) / denom;
+        xs.push(start[0] + t * (end[0] - start[0]));
+    }
+    if xs.len() < 2 {
+        return None;
+    }
+    xs.sort_by(f64::total_cmp);
+    Some((xs[0], *xs.last()?))
 }
 
 fn write_struct(out: &mut Vec<u8>, fields: &[Vec<u8>]) {
@@ -367,6 +614,22 @@ mod tests {
         assert!((loaded.pens[2].power - 33.0).abs() < 1e-6);
         assert!((loaded.pens[2].speed - 800.0).abs() < 1e-6);
         assert!((loaded.pens[2].frequency_khz - 40.0).abs() < 1e-6);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_filled_square_is_stored_as_a_hatch_ezcad_can_read() {
+        let mut doc = square_doc();
+        doc.paths[0].filled = true;
+        let path = std::env::temp_dir().join("ezd-studio-filled-square.ezd");
+        write_ezd(&path, &doc).expect("write");
+        let loaded = read_ezd(&path).expect("read");
+        assert!(
+            loaded.point_count() > doc.point_count(),
+            "hatch lines {}",
+            loaded.point_count()
+        );
+        assert!(loaded.paths.len() > 1);
         let _ = fs::remove_file(path);
     }
 

@@ -20,7 +20,7 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
-use crate::geom::{fill_regions, palette_color, Contour, Document, PathObj};
+use crate::geom::{fill_targets, palette_color, Contour, Document, PathObj};
 use crate::{Error, Result};
 
 /// A stored polyline stays within this distance of the true DXF curve.
@@ -330,7 +330,7 @@ fn skip_until_next_entity(pairs: &[(String, String)], index: &mut usize) {
 }
 
 fn is_geometry(ty: &str) -> bool {
-    // HATCH is the filled face written for eDrawings. It is not a mark path.
+    // 3DFACE is the filled face written for eDrawings. It is not a mark path.
     matches!(
         ty,
         "LINE" | "LWPOLYLINE" | "POLYLINE" | "CIRCLE" | "ARC" | "ELLIPSE" | "SPLINE" | "POINT"
@@ -1000,7 +1000,7 @@ fn encode_dxf(doc: &Document) -> Vec<u8> {
             pair(&mut out, 8, &layer_name);
         }
     }
-    write_fill_hatches(&mut out, doc, &split);
+    write_fill_faces(&mut out, doc, &split);
     pair(&mut out, 0, "ENDSEC");
     pair(&mut out, 0, "EOF");
     // The header names the code page ANSI_1252. ASCII is unchanged. A character
@@ -1008,11 +1008,14 @@ fn encode_dxf(doc: &Document) -> Vec<u8> {
     latin1_bytes(&out)
 }
 
-/// One solid hatch per filled path, so a viewer paints a continuous face.
+/// Filled faces for eDrawings. Each triangle is one Release 12 `3DFACE`.
 ///
-/// Separate `SOLID` triangles show their edges. A hatch does not. This reader
-/// skips `HATCH`, and restores the fill from the header note.
-fn write_fill_hatches(out: &mut String, doc: &Document, split: &HashSet<String>) {
+/// A `HATCH` in this Release 12 file is ignored, so the blue area disappeared.
+/// `SOLID` triangles were drawn with their edges, which showed up as lines.
+/// Group 70 value 15 marks every edge invisible, and each face is grown a
+/// little so neighboring faces overlap instead of leaving a crack.
+/// This reader skips `3DFACE` and restores the fill from the header note.
+fn write_fill_faces(out: &mut String, doc: &Document, split: &HashSet<String>) {
     let mut all = Vec::new();
     let mut owners = Vec::new();
     for (path_index, path) in doc.paths.iter().enumerate() {
@@ -1038,58 +1041,62 @@ fn write_fill_hatches(out: &mut String, doc: &Document, split: &HashSet<String>)
         }
         let layer_name = export_layer_name(path, doc, split);
         let aci = nearest_aci(pen_rgb(doc, path.pen)).to_string();
-        for region in fill_regions(&targets, &all) {
-            write_hatch(out, &layer_name, &aci, &region);
+        for mesh in fill_targets(&targets, &all) {
+            for tri in &mesh.tris {
+                write_face(
+                    out,
+                    &layer_name,
+                    &aci,
+                    expand_face(
+                        [
+                            mesh.pts[tri[0] as usize],
+                            mesh.pts[tri[1] as usize],
+                            mesh.pts[tri[2] as usize],
+                        ],
+                        0.08,
+                    ),
+                );
+            }
         }
     }
 }
 
-fn write_hatch(out: &mut String, layer: &str, aci: &str, region: &crate::geom::FillRegion) {
-    if region.outer.len() < 3 {
-        return;
+fn expand_face(corners: [[f64; 2]; 3], margin: f64) -> [[f64; 2]; 3] {
+    let center = [
+        (corners[0][0] + corners[1][0] + corners[2][0]) / 3.0,
+        (corners[0][1] + corners[1][1] + corners[2][1]) / 3.0,
+    ];
+    let mut grown = corners;
+    for corner in &mut grown {
+        let dx = corner[0] - center[0];
+        let dy = corner[1] - center[1];
+        let len = (dx * dx + dy * dy).sqrt();
+        if len < 1e-9 {
+            continue;
+        }
+        corner[0] += dx / len * margin;
+        corner[1] += dy / len * margin;
     }
-    pair(out, 0, "HATCH");
-    pair(out, 100, "AcDbEntity");
+    grown
+}
+
+fn write_face(out: &mut String, layer: &str, aci: &str, corners: [[f64; 2]; 3]) {
+    pair(out, 0, "3DFACE");
     pair(out, 8, layer);
     pair(out, 62, aci);
-    pair(out, 100, "AcDbHatch");
-    pair(out, 10, "0.0");
-    pair(out, 20, "0.0");
-    pair(out, 30, "0.0");
-    pair(out, 210, "0.0");
-    pair(out, 220, "0.0");
-    pair(out, 230, "1.0");
-    pair(out, 2, "SOLID");
-    pair(out, 70, "1");
-    pair(out, 71, "0");
-    let loops = 1 + region.holes.len();
-    pair(out, 91, &loops.to_string());
-    write_hatch_loop(out, &region.outer, true);
-    for hole in &region.holes {
-        if hole.len() >= 3 {
-            write_hatch_loop(out, hole, false);
-        }
-    }
-    // Odd parity leaves the openings empty.
-    pair(out, 75, "0");
-    pair(out, 76, "1");
-    pair(out, 47, "1.0");
-    pair(out, 98, "1");
-    pair(out, 10, &format_mm(region.seed[0]));
-    pair(out, 20, &format_mm(region.seed[1]));
+    // All four edges invisible: 1 + 2 + 4 + 8.
+    pair(out, 70, "15");
+    write_face_corner(out, 10, corners[0]);
+    write_face_corner(out, 11, corners[1]);
+    write_face_corner(out, 12, corners[2]);
+    // A triangle repeats its third corner as the fourth.
+    write_face_corner(out, 13, corners[2]);
 }
 
-fn write_hatch_loop(out: &mut String, points: &[[f64; 2]], outer: bool) {
-    // Bit 1 marks a polyline boundary. Bit 0 marks the external loop.
-    pair(out, 92, if outer { "3" } else { "2" });
-    pair(out, 72, "0");
-    pair(out, 73, "1");
-    pair(out, 93, &points.len().to_string());
-    for point in points {
-        pair(out, 10, &format_mm(point[0]));
-        pair(out, 20, &format_mm(point[1]));
-    }
-    pair(out, 97, "0");
+fn write_face_corner(out: &mut String, x_group: i32, point: [f64; 2]) {
+    pair(out, x_group, &format_mm(point[0]));
+    pair(out, x_group + 10, &format_mm(point[1]));
+    pair(out, x_group + 20, "0.0");
 }
 
 fn latin1_bytes(text: &str) -> Vec<u8> {
@@ -1563,7 +1570,9 @@ mod tests {
         write_dxf(&path, &doc).expect("write");
         let text = std::fs::read_to_string(&path).expect("text");
         assert!(text.contains("$EZDSTUDIO0\r\n  1\r\n8;255,128,0;1\r\n"));
-        assert!(text.contains("  0\r\nHATCH\r\n"));
+        assert!(text.contains("  0\r\n3DFACE\r\n"));
+        assert!(text.contains(" 70\r\n15\r\n"));
+        assert!(!text.contains("  0\r\nHATCH\r\n"));
         assert!(!text.contains("  0\r\nSOLID\r\n"));
         assert!(!text.contains("\r\n420\r\n"));
         let loaded = read_dxf(&path).expect("read");
@@ -1571,7 +1580,57 @@ mod tests {
         assert!(loaded.paths[0].filled);
         assert_eq!(loaded.paths[0].pen, 8);
         assert_eq!(loaded.pens[8].color, [255, 128, 0]);
+        let faces = face_triangles(&text);
+        assert!(faces.len() >= 2, "faces {}", faces.len());
+        for sample in [[0.5, 0.5], [2.0, 1.5], [3.5, 2.5]] {
+            assert!(
+                faces.iter().any(|face| point_in_face(sample, *face)),
+                "sample {sample:?} is outside the fill"
+            );
+        }
         let _ = std::fs::remove_file(path);
+    }
+
+    fn face_triangles(text: &str) -> Vec<[[f64; 2]; 3]> {
+        let pairs = parse_pairs(text);
+        let mut faces = Vec::new();
+        let mut index = 0;
+        while index < pairs.len() {
+            if pairs[index].0 == "0" && pairs[index].1 == "3DFACE" {
+                let mut points = Vec::new();
+                let mut x = None;
+                index += 1;
+                while index < pairs.len() && pairs[index].0 != "0" {
+                    match pairs[index].0.as_str() {
+                        "10" | "11" | "12" => x = pairs[index].1.parse().ok(),
+                        "20" | "21" | "22" => {
+                            if let Some(px) = x.take() {
+                                let y = pairs[index].1.parse().unwrap_or(0.0);
+                                points.push([px, y]);
+                            }
+                        }
+                        _ => {}
+                    }
+                    index += 1;
+                }
+                if points.len() >= 3 {
+                    faces.push([points[0], points[1], points[2]]);
+                }
+                continue;
+            }
+            index += 1;
+        }
+        faces
+    }
+
+    fn point_in_face(point: [f64; 2], face: [[f64; 2]; 3]) -> bool {
+        let cross = |a: [f64; 2], b: [f64; 2]| {
+            (b[0] - a[0]) * (point[1] - a[1]) - (b[1] - a[1]) * (point[0] - a[0])
+        };
+        let ab = cross(face[0], face[1]);
+        let bc = cross(face[1], face[2]);
+        let ca = cross(face[2], face[0]);
+        ab >= -1e-6 && bc >= -1e-6 && ca >= -1e-6 || ab <= 1e-6 && bc <= 1e-6 && ca <= 1e-6
     }
 
     fn assert_release_12(text: &str) {

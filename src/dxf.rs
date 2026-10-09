@@ -20,7 +20,7 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
-use crate::geom::{fill_targets, palette_color, Contour, Document, PathObj};
+use crate::geom::{fill_regions, palette_color, Contour, Document, PathObj};
 use crate::{Error, Result};
 
 /// A stored polyline stays within this distance of the true DXF curve.
@@ -330,7 +330,7 @@ fn skip_until_next_entity(pairs: &[(String, String)], index: &mut usize) {
 }
 
 fn is_geometry(ty: &str) -> bool {
-    // SOLID is a filled face written for eDrawings. It is not a mark path.
+    // HATCH is the filled face written for eDrawings. It is not a mark path.
     matches!(
         ty,
         "LINE" | "LWPOLYLINE" | "POLYLINE" | "CIRCLE" | "ARC" | "ELLIPSE" | "SPLINE" | "POINT"
@@ -1000,7 +1000,7 @@ fn encode_dxf(doc: &Document) -> Vec<u8> {
             pair(&mut out, 8, &layer_name);
         }
     }
-    write_fill_solids(&mut out, doc, &split);
+    write_fill_hatches(&mut out, doc, &split);
     pair(&mut out, 0, "ENDSEC");
     pair(&mut out, 0, "EOF");
     // The header names the code page ANSI_1252. ASCII is unchanged. A character
@@ -1008,11 +1008,11 @@ fn encode_dxf(doc: &Document) -> Vec<u8> {
     latin1_bytes(&out)
 }
 
-/// Filled faces for eDrawings. Each triangle is one Release 12 `SOLID`.
+/// One solid hatch per filled path, so a viewer paints a continuous face.
 ///
-/// EzCad imports outlines, not these faces, so the mark path stays the polyline.
-/// This reader also skips `SOLID`, and restores the fill from the header note.
-fn write_fill_solids(out: &mut String, doc: &Document, split: &HashSet<String>) {
+/// Separate `SOLID` triangles show their edges. A hatch does not. This reader
+/// skips `HATCH`, and restores the fill from the header note.
+fn write_fill_hatches(out: &mut String, doc: &Document, split: &HashSet<String>) {
     let mut all = Vec::new();
     let mut owners = Vec::new();
     for (path_index, path) in doc.paths.iter().enumerate() {
@@ -1038,39 +1038,58 @@ fn write_fill_solids(out: &mut String, doc: &Document, split: &HashSet<String>) 
         }
         let layer_name = export_layer_name(path, doc, split);
         let aci = nearest_aci(pen_rgb(doc, path.pen)).to_string();
-        for mesh in fill_targets(&targets, &all) {
-            for tri in &mesh.tris {
-                write_solid(
-                    out,
-                    &layer_name,
-                    &aci,
-                    [
-                        mesh.pts[tri[0] as usize],
-                        mesh.pts[tri[1] as usize],
-                        mesh.pts[tri[2] as usize],
-                    ],
-                );
-            }
+        for region in fill_regions(&targets, &all) {
+            write_hatch(out, &layer_name, &aci, &region);
         }
     }
 }
 
-fn write_solid(out: &mut String, layer: &str, aci: &str, corners: [[f64; 2]; 3]) {
-    pair(out, 0, "SOLID");
+fn write_hatch(out: &mut String, layer: &str, aci: &str, region: &crate::geom::FillRegion) {
+    if region.outer.len() < 3 {
+        return;
+    }
+    pair(out, 0, "HATCH");
+    pair(out, 100, "AcDbEntity");
     pair(out, 8, layer);
     pair(out, 62, aci);
-    // A triangle repeats its third corner as the fourth. Entered in boundary
-    // order, that is a filled face rather than a bowtie.
-    write_solid_corner(out, 10, corners[0]);
-    write_solid_corner(out, 11, corners[1]);
-    write_solid_corner(out, 12, corners[2]);
-    write_solid_corner(out, 13, corners[2]);
+    pair(out, 100, "AcDbHatch");
+    pair(out, 10, "0.0");
+    pair(out, 20, "0.0");
+    pair(out, 30, "0.0");
+    pair(out, 210, "0.0");
+    pair(out, 220, "0.0");
+    pair(out, 230, "1.0");
+    pair(out, 2, "SOLID");
+    pair(out, 70, "1");
+    pair(out, 71, "0");
+    let loops = 1 + region.holes.len();
+    pair(out, 91, &loops.to_string());
+    write_hatch_loop(out, &region.outer, true);
+    for hole in &region.holes {
+        if hole.len() >= 3 {
+            write_hatch_loop(out, hole, false);
+        }
+    }
+    // Odd parity leaves the openings empty.
+    pair(out, 75, "0");
+    pair(out, 76, "1");
+    pair(out, 47, "1.0");
+    pair(out, 98, "1");
+    pair(out, 10, &format_mm(region.seed[0]));
+    pair(out, 20, &format_mm(region.seed[1]));
 }
 
-fn write_solid_corner(out: &mut String, x_group: i32, point: [f64; 2]) {
-    pair(out, x_group, &format_mm(point[0]));
-    pair(out, x_group + 10, &format_mm(point[1]));
-    pair(out, x_group + 20, "0.0");
+fn write_hatch_loop(out: &mut String, points: &[[f64; 2]], outer: bool) {
+    // Bit 1 marks a polyline boundary. Bit 0 marks the external loop.
+    pair(out, 92, if outer { "3" } else { "2" });
+    pair(out, 72, "0");
+    pair(out, 73, "1");
+    pair(out, 93, &points.len().to_string());
+    for point in points {
+        pair(out, 10, &format_mm(point[0]));
+        pair(out, 20, &format_mm(point[1]));
+    }
+    pair(out, 97, "0");
 }
 
 fn latin1_bytes(text: &str) -> Vec<u8> {
@@ -1544,9 +1563,9 @@ mod tests {
         write_dxf(&path, &doc).expect("write");
         let text = std::fs::read_to_string(&path).expect("text");
         assert!(text.contains("$EZDSTUDIO0\r\n  1\r\n8;255,128,0;1\r\n"));
-        assert!(text.contains(" 62\r\n2\r\n"));
+        assert!(text.contains("  0\r\nHATCH\r\n"));
+        assert!(!text.contains("  0\r\nSOLID\r\n"));
         assert!(!text.contains("\r\n420\r\n"));
-        assert_eq!(text.matches("\r\nSOLID\r\n").count(), 2);
         let loaded = read_dxf(&path).expect("read");
         assert_eq!(loaded.paths.len(), 1);
         assert!(loaded.paths[0].filled);

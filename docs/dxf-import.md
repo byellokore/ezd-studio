@@ -68,7 +68,7 @@ Group 62 is the ACI color. 256 means ByLayer, and the layer's color from the LAY
 
 Pens 1 through 6 in a new document use the matching palette colors from `Document::new`. Pen 0 is black.
 
-The importer stores the camada on `PathObj::layer`. An entity with no group 8 is layer `0`. Geometry inside a block that sits on layer `0` takes the INSERT's layer. Group 420, when present on a file from another program, is a 24-bit RGB color and wins over the ACI pen table. Files written here are Release 12 and do not contain group 420, so they reopen through the ACI table.
+The importer stores the camada on `PathObj::layer`. An entity with no group 8 is layer `0`. Geometry inside a block that sits on layer `0` takes the INSERT's layer. Group 420, when present on a file from another program, is a 24-bit RGB color and wins over the ACI pen table. Files written here do not contain group 420. They store the pen index, the exact RGB, and the fill flag in `$EZDSTUDIO` header notes, and this program restores those on open. A file without those notes still uses the ACI pen table.
 
 ## DXF export
 
@@ -78,7 +78,7 @@ EzCad imports the whole drawing as one VectorFile. That row is blue because the 
 
 Each contour with at least two points becomes one `POLYLINE`, then one `VERTEX` per point, then `SEQEND`. This is the entity Release 12 defines. `LWPOLYLINE`, group 90, group 100, group 330, and group 420 are not written. A file that claimed AC1021 and then omitted the Release 2007 sections was not a drawing eDrawings could open.
 
-The layer is the stored camada when every exported contour on that camada uses the same pen. When one camada carries several pens, each pen gets its own layer, named `camada` plus the pen name (`Camada 1 Pen 2`). EzCad keeps one color per layer, so a shared camada was imported as one blue VectorFile. When `layer` is empty, which is every path read from `.ezd`, the layer name is the pen name. The LAYER table and every polyline carry the nearest ACI (group 62). Exact RGB does not survive this save. Palette pens 1 through 6 map back onto themselves. An orange custom pen is stored as yellow.
+The layer is the stored camada when every exported contour on that camada uses the same pen. When one camada carries several pens, each pen gets its own layer, named `camada` plus the pen name (`Camada 1 Pen 2`). EzCad keeps one color per layer, so a shared camada was imported as one blue VectorFile. When `layer` is empty, which is every path read from `.ezd`, the layer name is the pen name. The LAYER table and every polyline carry the nearest ACI (group 62), which is what EzCad sees. Exact RGB and the fill flag travel in `$EZDSTUDIOn` header notes (`pen;R,G,B;1`). This program restores them on open. Another program ignores those notes. Group 420 is not written.
 
 A closed contour does not repeat its first point in the file. Group 70 bit 0 marks it closed. Characters a DXF layer name cannot contain (`<>/\:;?*|,=`) become underscores.
 

@@ -576,6 +576,7 @@ fn push_path(
         name,
         layer: String::new(),
         pen,
+        filled: false,
         contours,
     });
 }

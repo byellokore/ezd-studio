@@ -51,6 +51,7 @@ pub fn read_dxf(path: &Path) -> Result<Document> {
     }
     let text = String::from_utf8_lossy(&bytes);
     let pairs = parse_pairs(&text);
+    let notes = studio_notes(&pairs);
     let (layers, blocks, model) = split_sections(&pairs);
     let mut doc = Document::new(file_title(path));
     let mut index = 0_usize;
@@ -66,6 +67,7 @@ pub fn read_dxf(path: &Path) -> Result<Document> {
             "the DXF has no lines, polylines, or splines to mark".to_owned(),
         ));
     }
+    apply_studio(&mut doc, &notes);
     doc.center_on_field();
     Ok(doc)
 }
@@ -465,6 +467,7 @@ fn push_entity(
     doc.paths.push(PathObj {
         name: format!("{kind} {index}"),
         pen,
+        filled: false,
         layer,
         contours,
     });
@@ -510,6 +513,7 @@ fn expand_insert(
         doc.paths.push(PathObj {
             name: format!("{name} {index}"),
             pen,
+            filled: false,
             layer,
             contours,
         });
@@ -947,11 +951,12 @@ fn encode_dxf(doc: &Document) -> Vec<u8> {
     let split = camadas_with_several_pens(doc);
     let layers = export_layers(doc, &split);
     let (ext_min, ext_max) = drawing_extents(doc);
+    let notes = studio_exports(doc);
     let mut out = String::new();
     // AutoCAD Release 12. Claiming AC1021 without handles, subclass markers,
     // CLASSES, and OBJECTS is the file eDrawings rejects. Group 420 is not a
     // Release 12 code; TrueView discards the drawing on an unknown group.
-    write_header(&mut out, ext_min, ext_max);
+    write_header(&mut out, ext_min, ext_max, &notes);
     pair(&mut out, 0, "SECTION");
     pair(&mut out, 2, "TABLES");
     write_ltype_table(&mut out);
@@ -1034,7 +1039,83 @@ fn drawing_extents(doc: &Document) -> ([f64; 2], [f64; 2]) {
     }
 }
 
-fn write_header(out: &mut String, min: [f64; 2], max: [f64; 2]) {
+struct StudioNote {
+    pen: usize,
+    rgb: [u8; 3],
+    filled: bool,
+}
+
+/// One note per exported contour, in polyline order: `pen;R,G,B;filled`.
+fn studio_exports(doc: &Document) -> Vec<String> {
+    let mut notes = Vec::new();
+    for path in &doc.paths {
+        for contour in &path.contours {
+            if polyline_vertices(contour).len() < 2 {
+                continue;
+            }
+            let rgb = pen_rgb(doc, path.pen);
+            let filled = if path.filled { "1" } else { "0" };
+            notes.push(format!(
+                "{};{},{},{};{filled}",
+                path.pen, rgb[0], rgb[1], rgb[2]
+            ));
+        }
+    }
+    notes
+}
+
+fn studio_notes(pairs: &[(String, String)]) -> Vec<StudioNote> {
+    let mut indexed = Vec::new();
+    for window in pairs.windows(2) {
+        if window[0].0 != "9" {
+            continue;
+        }
+        let Some(index) = window[0].1.strip_prefix("$EZDSTUDIO") else {
+            continue;
+        };
+        let Ok(index) = index.parse::<usize>() else {
+            continue;
+        };
+        if window[1].0 != "1" {
+            continue;
+        }
+        if let Some(note) = parse_studio_note(&window[1].1) {
+            indexed.push((index, note));
+        }
+    }
+    indexed.sort_by_key(|(index, _)| *index);
+    indexed.into_iter().map(|(_, note)| note).collect()
+}
+
+fn parse_studio_note(value: &str) -> Option<StudioNote> {
+    let mut parts = value.split(';');
+    let pen = parts.next()?.parse().ok()?;
+    let mut channels = parts.next()?.split(',');
+    let red = channels.next()?.parse().ok()?;
+    let green = channels.next()?.parse().ok()?;
+    let blue = channels.next()?.parse().ok()?;
+    let filled = parts.next()? == "1";
+    Some(StudioNote {
+        pen,
+        rgb: [red, green, blue],
+        filled,
+    })
+}
+
+fn apply_studio(doc: &mut Document, notes: &[StudioNote]) {
+    if notes.len() != doc.paths.len() || notes.iter().any(|note| note.pen >= doc.pens.len()) {
+        return;
+    }
+    for (path, note) in doc.paths.iter_mut().zip(notes) {
+        path.pen = note.pen;
+        path.filled = note.filled;
+    }
+    for note in notes {
+        doc.pens[note.pen].color = note.rgb;
+    }
+}
+
+fn write_header(out: &mut String, min: [f64; 2], max: [f64; 2], notes: &[String]) {
     pair(out, 0, "SECTION");
     pair(out, 2, "HEADER");
     pair(out, 9, "$ACADVER");
@@ -1075,6 +1156,13 @@ fn write_header(out: &mut String, min: [f64; 2], max: [f64; 2]) {
     pair(out, 70, "4");
     pair(out, 9, "$MEASUREMENT");
     pair(out, 70, "1");
+    // Release 12 skips a header variable it does not know. These notes carry
+    // the pen index, the exact RGB, and the fill flag for this program.
+    // The polyline itself still has only the nearest ACI, for EzCad.
+    for (index, note) in notes.iter().enumerate() {
+        pair(out, 9, &format!("$EZDSTUDIO{index}"));
+        pair(out, 1, note);
+    }
     pair(out, 0, "ENDSEC");
 }
 
@@ -1306,6 +1394,7 @@ mod tests {
             name: "Box".into(),
             layer: "Camada 1".into(),
             pen: 2,
+            filled: false,
             contours: vec![Contour {
                 closed: true,
                 pts: vec![[-10.0, -5.0], [10.0, -5.0], [10.0, 5.0], [-10.0, 5.0]],
@@ -1361,12 +1450,39 @@ mod tests {
         write_dxf(&path, &doc).expect("write");
         let text = std::fs::read_to_string(&path).expect("text");
         assert!(text.contains("Corte"));
-        // Release 12 stores the nearest ACI, not the exact RGB. Orange is yellow.
+        // The polyline keeps the nearest ACI for EzCad. Orange is stored as yellow there.
         assert!(text.contains(" 62\r\n2\r\n"));
         let loaded = read_dxf(&path).expect("read");
         assert_eq!(loaded.paths[0].layer, "Corte");
         assert_eq!(loaded.paths[0].pen, 5);
-        assert_eq!(loaded.pens[loaded.paths[0].pen].color, palette_color(5));
+        assert_eq!(loaded.pens[loaded.paths[0].pen].color, [255, 128, 0]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_filled_orange_contour_keeps_its_color_and_its_fill() {
+        let mut doc = Document::new("orange");
+        doc.pens[8].color = [255, 128, 0];
+        doc.paths.push(PathObj {
+            name: "Bowl".into(),
+            layer: "Camada 1".into(),
+            pen: 8,
+            filled: true,
+            contours: vec![Contour {
+                closed: true,
+                pts: vec![[0.0, 0.0], [4.0, 0.0], [4.0, 3.0], [0.0, 3.0]],
+            }],
+        });
+        let path = std::env::temp_dir().join("ezd-studio-orange-fill.dxf");
+        write_dxf(&path, &doc).expect("write");
+        let text = std::fs::read_to_string(&path).expect("text");
+        assert!(text.contains("$EZDSTUDIO0\r\n  1\r\n8;255,128,0;1\r\n"));
+        assert!(text.contains(" 62\r\n2\r\n"));
+        assert!(!text.contains("\r\n420\r\n"));
+        let loaded = read_dxf(&path).expect("read");
+        assert!(loaded.paths[0].filled);
+        assert_eq!(loaded.paths[0].pen, 8);
+        assert_eq!(loaded.pens[8].color, [255, 128, 0]);
         let _ = std::fs::remove_file(path);
     }
 
@@ -1554,6 +1670,7 @@ mod tests {
             name: name.into(),
             layer: layer.into(),
             pen,
+            filled: false,
             contours: vec![Contour {
                 closed: true,
                 pts: vec![[x, 0.0], [x + 2.0, 0.0], [x + 2.0, 2.0], [x, 2.0]],

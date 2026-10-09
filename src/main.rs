@@ -160,6 +160,7 @@ impl Studio {
                 self.filled.clear();
                 self.fill_cache.clear();
                 self.fill_undo.clear();
+                self.restore_fills();
                 self.fit_next = true;
             }
             Err(err) => self.status = err.to_string(),
@@ -223,6 +224,9 @@ impl Studio {
             .unwrap_or_else(|| "path".to_owned());
         if self.filled.remove(&index) {
             self.fill_cache.remove(&index);
+            if let Some(path) = self.doc.paths.get_mut(index) {
+                path.filled = false;
+            }
             self.fill_undo.push(FillChange::Cleared(index));
             self.status = format!("Cleared the fill on {name}");
             return;
@@ -260,6 +264,9 @@ impl Studio {
         }
         self.filled.insert(index);
         self.fill_cache.insert(index, meshes);
+        if let Some(path) = self.doc.paths.get_mut(index) {
+            path.filled = true;
+        }
         true
     }
 
@@ -272,6 +279,9 @@ impl Studio {
             FillChange::Filled(index) => {
                 self.filled.remove(&index);
                 self.fill_cache.remove(&index);
+                if let Some(path) = self.doc.paths.get_mut(index) {
+                    path.filled = false;
+                }
                 index
             }
             FillChange::Cleared(index) => {
@@ -286,6 +296,20 @@ impl Studio {
             .map(|path| path.name.clone())
             .unwrap_or_else(|| "path".to_owned());
         self.status = format!("Undid the last fill on {name}");
+    }
+
+    fn restore_fills(&mut self) {
+        let indices: Vec<usize> = self
+            .doc
+            .paths
+            .iter()
+            .enumerate()
+            .filter(|(_, path)| path.filled)
+            .map(|(index, _)| index)
+            .collect();
+        for index in indices {
+            self.paint_fill(index);
+        }
     }
 }
 
@@ -473,7 +497,7 @@ impl eframe::App for Studio {
                     self.toggle_fill();
                 }
                 ui.label(
-                    egui::RichText::new("⌘F fills the selected path with its pen color. Openings inside it stay empty. ⌘Z undoes the last fill. The saved file still marks the outline.")
+                    egui::RichText::new("⌘F fills the selected path with its pen color. Openings inside it stay empty. ⌘Z undoes the last fill. Save .dxf keeps the fill and the exact color.")
                         .small()
                         .weak(),
                 );

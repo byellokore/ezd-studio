@@ -429,6 +429,7 @@ mod tests {
             name: "Box".into(),
             layer: String::new(),
             pen: 2,
+            filled: false,
             contours: vec![Contour {
                 closed: true,
                 pts: vec![[-10.0, -5.0], [10.0, -5.0], [10.0, 5.0], [-10.0, 5.0]],

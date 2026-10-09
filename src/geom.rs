@@ -18,6 +18,10 @@ pub struct PathObj {
     pub layer: String,
     /// Index into [`Document::pens`].
     pub pen: usize,
+    /// When set, the window paints the inside of this path with the pen color.
+    ///
+    /// The laser file still stores the outline. A DXF saved here remembers the flag.
+    pub filled: bool,
     /// Geometry. Empty for notes that carry no path.
     pub contours: Vec<Contour>,
 }

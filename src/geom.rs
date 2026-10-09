@@ -354,6 +354,249 @@ fn points_touch(a: [f64; 2], b: [f64; 2]) -> bool {
     dx * dx + dy * dy < 1e-12
 }
 
+/// A filled region: vertices in millimeters and triangle indices into those vertices.
+#[derive(Clone, Debug)]
+pub struct FillMesh {
+    /// Vertices in millimeters.
+    pub pts: Vec<[f64; 2]>,
+    /// Triangle corners, as indices into [`Self::pts`].
+    pub tris: Vec<[u32; 3]>,
+}
+
+/// Fill each target contour, cutting out any other contour that sits inside it.
+///
+/// A letter such as B is an outer contour plus inner openings. Filling the outer
+/// contour alone would paint those openings shut. Contours nested directly inside
+/// a target become holes. Filling one of those openings still paints just that opening.
+#[must_use]
+pub fn fill_targets(targets: &[&[[f64; 2]]], all: &[&[[f64; 2]]]) -> Vec<FillMesh> {
+    let mut meshes = Vec::new();
+    for target in targets {
+        if targets
+            .iter()
+            .any(|other| !std::ptr::eq(*other, *target) && contour_inside(target, other))
+        {
+            continue;
+        }
+        let holes: Vec<&[[f64; 2]]> = all
+            .iter()
+            .copied()
+            .filter(|other| {
+                !std::ptr::eq(*other, *target)
+                    && contour_inside(other, target)
+                    && !all.iter().any(|mid| {
+                        !std::ptr::eq(*mid, *target)
+                            && !std::ptr::eq(*mid, *other)
+                            && contour_inside(mid, target)
+                            && contour_inside(other, mid)
+                    })
+            })
+            .collect();
+        let mesh = fill_with_holes(target, &holes);
+        if !mesh.tris.is_empty() {
+            meshes.push(mesh);
+        }
+    }
+    meshes
+}
+
+fn fill_with_holes(outer: &[[f64; 2]], holes: &[&[[f64; 2]]]) -> FillMesh {
+    let mut pts = clean_ring(outer);
+    if ring_area_pts(&pts) < 0.0 {
+        pts.reverse();
+    }
+    for hole in holes {
+        let mut ring = clean_ring(hole);
+        if ring.len() < 3 {
+            continue;
+        }
+        if ring_area_pts(&ring) > 0.0 {
+            ring.reverse();
+        }
+        splice_hole(&mut pts, &ring);
+    }
+    let tris = fill_triangles(&pts);
+    FillMesh { pts, tris }
+}
+
+fn clean_ring(pts: &[[f64; 2]]) -> Vec<[f64; 2]> {
+    let mut ring = Vec::new();
+    for point in pts {
+        if ring
+            .last()
+            .is_some_and(|prev: &[f64; 2]| points_touch(*prev, *point))
+        {
+            continue;
+        }
+        ring.push(*point);
+    }
+    if ring.len() >= 2 && points_touch(ring[0], *ring.last().unwrap_or(&ring[0])) {
+        ring.pop();
+    }
+    ring
+}
+
+fn ring_area_pts(pts: &[[f64; 2]]) -> f64 {
+    let mut sum = 0.0;
+    for index in 0..pts.len() {
+        let current = pts[index];
+        let next = pts[(index + 1) % pts.len()];
+        sum += current[0] * next[1] - next[0] * current[1];
+    }
+    sum * 0.5
+}
+
+/// `inner` is a hole of `outer` when its body sits inside and it is smaller.
+fn contour_inside(inner: &[[f64; 2]], outer: &[[f64; 2]]) -> bool {
+    if inner.len() < 3 || outer.len() < 3 {
+        return false;
+    }
+    if ring_area_pts(inner).abs() >= ring_area_pts(outer).abs() * 0.98 {
+        return false;
+    }
+    let mut cx = 0.0;
+    let mut cy = 0.0;
+    for point in inner {
+        cx += point[0];
+        cy += point[1];
+    }
+    let count = inner.len() as f64;
+    if !point_inside([cx / count, cy / count], outer) {
+        return false;
+    }
+    let inside = inner
+        .iter()
+        .filter(|point| point_inside(**point, outer))
+        .count();
+    inside * 2 >= inner.len()
+}
+
+fn point_inside(point: [f64; 2], pts: &[[f64; 2]]) -> bool {
+    let mut inside = false;
+    let mut previous = pts.len() - 1;
+    for index in 0..pts.len() {
+        let current = pts[index];
+        let prior = pts[previous];
+        let crosses = (current[1] > point[1]) != (prior[1] > point[1]);
+        if crosses {
+            let x = (prior[0] - current[0]) * (point[1] - current[1]) / (prior[1] - current[1])
+                + current[0];
+            if point[0] < x {
+                inside = !inside;
+            }
+        }
+        previous = index;
+    }
+    inside
+}
+
+fn splice_hole(outer: &mut Vec<[f64; 2]>, hole: &[[f64; 2]]) {
+    let Some(bridge) = bridge_to_outer(outer, hole) else {
+        return;
+    };
+    let mut hi = 0;
+    for index in 1..hole.len() {
+        if hole[index][0] > hole[hi][0] {
+            hi = index;
+        }
+    }
+    let mut next = Vec::with_capacity(outer.len() + hole.len() + 2);
+    next.push(outer[bridge]);
+    for step in 0..hole.len() {
+        next.push(hole[(hi + step) % hole.len()]);
+    }
+    next.push(hole[hi]);
+    next.push(outer[bridge]);
+    for step in 1..outer.len() {
+        next.push(outer[(bridge + step) % outer.len()]);
+    }
+    *outer = next;
+}
+
+fn bridge_to_outer(outer: &[[f64; 2]], hole: &[[f64; 2]]) -> Option<usize> {
+    let mut hi = 0;
+    for index in 1..hole.len() {
+        if hole[index][0] > hole[hi][0] {
+            hi = index;
+        }
+    }
+    let point = hole[hi];
+    let mut best_dist = f64::MAX;
+    let mut best_edge = None;
+    for index in 0..outer.len() {
+        let Some(dist) = ray_hit_right(point, outer[index], outer[(index + 1) % outer.len()])
+        else {
+            continue;
+        };
+        if dist < best_dist {
+            best_dist = dist;
+            best_edge = Some(index);
+        }
+    }
+    let edge = best_edge?;
+    let end = (edge + 1) % outer.len();
+    let winding = ring_area_pts(outer).signum();
+    let mut reflex = Vec::new();
+    for index in 0..outer.len() {
+        if index == edge || index == end {
+            continue;
+        }
+        if !is_reflex(outer, index, winding) {
+            continue;
+        }
+        if strictly_inside(outer[index], point, outer[edge], outer[end]) {
+            reflex.push(index);
+        }
+    }
+    if reflex.is_empty() {
+        if outer[edge][0] >= outer[end][0] {
+            Some(edge)
+        } else {
+            Some(end)
+        }
+    } else {
+        reflex.into_iter().min_by(|left, right| {
+            let left_d = point_distance(point, outer[*left]);
+            let right_d = point_distance(point, outer[*right]);
+            left_d.total_cmp(&right_d)
+        })
+    }
+}
+
+fn ray_hit_right(point: [f64; 2], start: [f64; 2], end: [f64; 2]) -> Option<f64> {
+    if (start[1] > point[1]) == (end[1] > point[1]) {
+        return None;
+    }
+    let denom = end[1] - start[1];
+    if denom.abs() < 1e-12 {
+        return None;
+    }
+    let t = (point[1] - start[1]) / denom;
+    if !(0.0..=1.0).contains(&t) {
+        return None;
+    }
+    let x = start[0] + t * (end[0] - start[0]);
+    let dist = x - point[0];
+    if dist < -1e-9 {
+        None
+    } else {
+        Some(dist)
+    }
+}
+
+fn is_reflex(pts: &[[f64; 2]], index: usize, winding: f64) -> bool {
+    let prev = pts[(index + pts.len() - 1) % pts.len()];
+    let curr = pts[index];
+    let next = pts[(index + 1) % pts.len()];
+    cross(prev, curr, next) * winding < -1e-12
+}
+
+fn point_distance(a: [f64; 2], b: [f64; 2]) -> f64 {
+    let dx = a[0] - b[0];
+    let dy = a[1] - b[1];
+    (dx * dx + dy * dy).sqrt()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -407,5 +650,38 @@ mod tests {
             }),
             "the notch was filled"
         );
+    }
+
+    fn covers(mesh: &FillMesh, point: [f64; 2]) -> bool {
+        mesh.tris.iter().any(|tri| {
+            strictly_inside(
+                point,
+                mesh.pts[tri[0] as usize],
+                mesh.pts[tri[1] as usize],
+                mesh.pts[tri[2] as usize],
+            )
+        })
+    }
+
+    #[test]
+    fn an_opening_inside_a_letter_stays_empty() {
+        let outer = [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]];
+        let hole = [[4.0, 4.0], [6.0, 4.0], [6.0, 6.0], [4.0, 6.0]];
+        let meshes = fill_targets(&[&outer], &[&outer, &hole]);
+        assert_eq!(meshes.len(), 1);
+        assert!((area_of(&meshes[0].pts, &meshes[0].tris) - 96.0).abs() < 1e-6);
+        assert!(covers(&meshes[0], [1.0, 5.0]));
+        assert!(!covers(&meshes[0], [4.7, 5.3]));
+    }
+
+    #[test]
+    fn filling_the_opening_itself_paints_only_that_opening() {
+        let outer = [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]];
+        let hole = [[4.0, 4.0], [6.0, 4.0], [6.0, 6.0], [4.0, 6.0]];
+        let meshes = fill_targets(&[&hole], &[&outer, &hole]);
+        assert_eq!(meshes.len(), 1);
+        assert!((area_of(&meshes[0].pts, &meshes[0].tris) - 4.0).abs() < 1e-6);
+        assert!(covers(&meshes[0], [4.5, 5.2]));
+        assert!(!covers(&meshes[0], [1.0, 5.0]));
     }
 }

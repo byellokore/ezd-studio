@@ -1,7 +1,7 @@
 //! macOS window for opening DXF and EzCad drawings and saving `.ezd` or `.dxf`.
 
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Shape, Stroke, Vec2};
-use ezd_studio::{fill_triangles, open_drawing, write_dxf, write_ezd, Document, Pen};
+use ezd_studio::{fill_targets, open_drawing, write_dxf, write_ezd, Document, FillMesh, Pen};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
@@ -114,8 +114,10 @@ struct Studio {
     selected: Option<usize>,
     /// Paths whose closed contours are painted solid with their pen color.
     filled: HashSet<usize>,
-    /// Triangle indices for each filled path, one list per contour.
-    fill_cache: HashMap<usize, Vec<Vec<[u32; 3]>>>,
+    /// Filled regions for each path, with inner openings cut out.
+    fill_cache: HashMap<usize, Vec<FillMesh>>,
+    /// Newest fill action last, so ⌘Z can reverse it.
+    fill_undo: Vec<FillChange>,
     view: View,
     status: String,
     fit_next: bool,
@@ -129,6 +131,7 @@ impl Studio {
             selected: None,
             filled: HashSet::new(),
             fill_cache: HashMap::new(),
+            fill_undo: Vec::new(),
             view: View {
                 center_x: 0.0,
                 center_y: 0.0,
@@ -156,6 +159,7 @@ impl Studio {
                 self.selected = None;
                 self.filled.clear();
                 self.fill_cache.clear();
+                self.fill_undo.clear();
                 self.fit_next = true;
             }
             Err(err) => self.status = err.to_string(),
@@ -219,32 +223,75 @@ impl Studio {
             .unwrap_or_else(|| "path".to_owned());
         if self.filled.remove(&index) {
             self.fill_cache.remove(&index);
+            self.fill_undo.push(FillChange::Cleared(index));
             self.status = format!("Cleared the fill on {name}");
             return;
         }
-        let Some(path) = self.doc.paths.get(index) else {
-            self.status = "Select a path, then press ⌘F to fill it.".to_owned();
-            return;
-        };
-        let parts: Vec<Vec<[u32; 3]>> = path
-            .contours
-            .iter()
-            .map(|contour| {
+        if self.paint_fill(index) {
+            self.fill_undo.push(FillChange::Filled(index));
+            self.status = format!("Filled {name} with its pen color");
+        }
+    }
+
+    fn paint_fill(&mut self, index: usize) -> bool {
+        let mut all = Vec::new();
+        let mut target_at = Vec::new();
+        for (path_index, path) in self.doc.paths.iter().enumerate() {
+            for contour in &path.contours {
                 if contour.closed && contour.pts.len() >= 3 {
-                    fill_triangles(&contour.pts)
-                } else {
-                    Vec::new()
+                    if path_index == index {
+                        target_at.push(all.len());
+                    }
+                    all.push(contour.pts.as_slice());
                 }
-            })
-            .collect();
-        if parts.iter().all(Vec::is_empty) {
+            }
+        }
+        let targets: Vec<&[[f64; 2]]> = target_at.iter().map(|slot| all[*slot]).collect();
+        let meshes = fill_targets(&targets, &all);
+        if meshes.is_empty() {
+            let name = self
+                .doc
+                .paths
+                .get(index)
+                .map(|path| path.name.clone())
+                .unwrap_or_else(|| "path".to_owned());
             self.status = format!("{name} is open, so there is no inside to fill");
-            return;
+            return false;
         }
         self.filled.insert(index);
-        self.fill_cache.insert(index, parts);
-        self.status = format!("Filled {name} with its pen color");
+        self.fill_cache.insert(index, meshes);
+        true
     }
+
+    fn undo_fill(&mut self) {
+        let Some(change) = self.fill_undo.pop() else {
+            self.status = "Nothing to undo".to_owned();
+            return;
+        };
+        let index = match change {
+            FillChange::Filled(index) => {
+                self.filled.remove(&index);
+                self.fill_cache.remove(&index);
+                index
+            }
+            FillChange::Cleared(index) => {
+                self.paint_fill(index);
+                index
+            }
+        };
+        let name = self
+            .doc
+            .paths
+            .get(index)
+            .map(|path| path.name.clone())
+            .unwrap_or_else(|| "path".to_owned());
+        self.status = format!("Undid the last fill on {name}");
+    }
+}
+
+enum FillChange {
+    Filled(usize),
+    Cleared(usize),
 }
 
 impl eframe::App for Studio {
@@ -257,6 +304,12 @@ impl eframe::App for Studio {
         }
         if ctx.input(|input| input.modifiers.command && input.key_pressed(egui::Key::F)) {
             self.toggle_fill();
+        }
+        if ctx.input(|input| {
+            input.modifiers.command && !input.modifiers.shift && input.key_pressed(egui::Key::Z)
+        }) && ctx.memory(|memory| memory.focused().is_none())
+        {
+            self.undo_fill();
         }
 
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
@@ -420,7 +473,7 @@ impl eframe::App for Studio {
                     self.toggle_fill();
                 }
                 ui.label(
-                    egui::RichText::new("⌘F fills the selected path with its pen color. The saved file still marks the outline.")
+                    egui::RichText::new("⌘F fills the selected path with its pen color. Openings inside it stay empty. ⌘Z undoes the last fill. The saved file still marks the outline.")
                         .small()
                         .weak(),
                 );
@@ -524,7 +577,7 @@ fn paint_field(
     view: &View,
     doc: &Document,
     selected: Option<usize>,
-    fills: &HashMap<usize, Vec<Vec<[u32; 3]>>>,
+    fills: &HashMap<usize, Vec<FillMesh>>,
 ) {
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, Color32::from_rgb(214, 210, 200));
@@ -576,15 +629,15 @@ fn paint_field(
             Stroke::new(1.15_f32, color)
         };
         if let Some(parts) = fills.get(&index) {
-            for (contour, tris) in path.contours.iter().zip(parts.iter()) {
-                if tris.is_empty() {
+            for part in parts {
+                if part.tris.is_empty() {
                     continue;
                 }
                 let mut mesh = egui::Mesh::default();
-                for pt in &contour.pts {
+                for pt in &part.pts {
                     mesh.colored_vertex(view.to_screen(pt[0], pt[1], origin), color);
                 }
-                for tri in tris {
+                for tri in &part.tris {
                     mesh.add_triangle(tri[0], tri[1], tri[2]);
                 }
                 painter.add(Shape::mesh(mesh));

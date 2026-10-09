@@ -6,7 +6,7 @@ mod geom;
 
 pub use dxf::{read_dxf, write_dxf};
 pub use ezd::{read_ezd, write_ezd};
-pub use geom::{fill_triangles, Bounds, Contour, Document, PathObj, Pen};
+pub use geom::{fill_targets, fill_triangles, Bounds, Contour, Document, FillMesh, PathObj, Pen};
 
 /// Errors from reading or writing a drawing.
 #[derive(Debug, thiserror::Error)]
